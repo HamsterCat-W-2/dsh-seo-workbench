@@ -18,6 +18,8 @@
 
 import { runAudit, runPageSpeed } from './lib/engine.js';
 import { runLocalDeep } from './lib/localdeep.js';
+import { crawlSite } from './lib/crawl.js';
+import { buildSiteReport } from './lib/site.js';
 
 export const inject = ['webServer', 'llm'];
 
@@ -189,6 +191,31 @@ export function apply(ctx, config = {}) {
         }),
       }),
     'seo-workbench: audit route',
+  );
+
+  // POST /api/site-audit — crawl the site (robots-respecting, same-host, BFS
+  // from the start URL + sitemap, bounded by maxPages/maxDepth) and aggregate
+  // cross-page checks into a report shaped like the single-page audit.
+  ctx.effect(
+    () =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path: `${API}site-audit`,
+        handler: createUrlHandler(async (url, body) => {
+          const crawl = await crawlSite(url, {
+            maxPages: clampInt(body && body.maxPages, 2, 200, 30),
+            maxDepth: clampInt(body && body.maxDepth, 1, 10, 3),
+            concurrency: clampInt(body && body.concurrency, 1, 8, 4),
+            fetchTimeoutMs: clampInt(body && body.fetchTimeoutMs, 1000, 60000, baseAuditOptions.timeoutMs),
+            maxRedirects: clampInt(body && body.maxRedirects, 0, 10, baseAuditOptions.maxRedirects),
+            userAgent: baseAuditOptions.userAgent,
+            deadLinkSample: clampInt(body && body.deadLinkSample, 0, 100, 40),
+          });
+          if (crawl.status === 'error') return crawl;
+          return buildSiteReport(crawl);
+        }),
+      }),
+    'seo-workbench: site-audit route',
   );
 
   // POST /api/deep — measure real Core Web Vitals:
