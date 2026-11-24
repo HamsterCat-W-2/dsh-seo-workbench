@@ -1,5 +1,7 @@
 /**
- * Client half of @local/seo-workbench — the right-sidebar SEO workbench panel.
+ * Client half of @local/seo-workbench — a left-sidebar panel (navigation row,
+ * same surface as Plugins/Settings) opening the SEO workbench in the central
+ * `main` column.
  *
  * Plain JS (loaded by the ModuleLoader, no build step) using
  * React.createElement; React comes from the browser module table via
@@ -559,7 +561,39 @@ window.__ModuleLoader__.load({
       );
     }
 
+    // ---------- icon (left-sidebar navigation row) ----------
+    // The `sidebar.panel.icon` factory hands the component its display size.
+    function SeoWorkbenchIcon(owner = {}) {
+      const size = owner.size ?? 16;
+      return el('svg', {
+        width: size,
+        height: size,
+        viewBox: '0 0 16 16',
+        fill: 'none',
+        stroke: 'currentColor',
+        strokeWidth: 1.4,
+        strokeLinecap: 'round',
+        strokeLinejoin: 'round',
+        'aria-hidden': true,
+      },
+        el('rect', { x: 3, y: 2, width: 8.5, height: 11.5, rx: 1.5 }),
+        el('path', { d: 'M5.2 5.2h4.1M5.2 7.4h4.1M5.2 9.6h2.6' }),
+        el('circle', { cx: 11.1, cy: 10.9, r: 2.1 }),
+        el('path', { d: 'M12.7 12.5l1.5 1.5' }),
+      );
+    }
+
     // ---------- registration ----------
+    // Both surfaces share the same body component:
+    //  - left sidebar: a `sidebar.panellist` navigation row (icon + label) whose
+    //    id opens the `main` central panel registered under the same key;
+    //  - right sidebar: a `sidebar.right.pane.tab` type opened from the tab strip.
+    const leftEntry = {
+      id: 'seo-workbench',
+      order: 10,
+      label: 'SEO 分析',
+    };
+
     const definition = {
       id: 'seo-workbench',
       kind: 'seo-workbench',
@@ -575,7 +609,7 @@ window.__ModuleLoader__.load({
     };
 
     const CSS = `
-.seo-wb-root { display:flex; flex-direction:column; gap:10px; padding:12px; font-size:13px; color: var(--dsw-alias-label-primary); }
+.seo-wb-root { display:flex; flex-direction:column; gap:10px; padding:12px; font-size:13px; color: var(--dsw-alias-label-primary); max-width:860px; width:100%; margin:0 auto; }
 .seo-wb-input-row { display:flex; gap:6px; }
 .seo-wb-input { flex:1; min-width:0; padding:6px 8px; font-size:13px; color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-layer-2); border:1px solid var(--dsw-alias-border-l1); border-radius:6px; }
 .seo-wb-input:focus { outline:none; border-color: var(--dsw-alias-brand-primary); }
@@ -633,10 +667,23 @@ window.__ModuleLoader__.load({
           const style = document.createElement('style');
           style.textContent = CSS;
           document.head.appendChild(style);
-          const disposers = [
+
+          // Left sidebar row + its central page.
+          const leftDisposers = [
+            ctx.slots.register(
+              { name: 'sidebar.panellist', id: leftEntry.id, order: leftEntry.order, label: leftEntry.label },
+              SeoWorkbenchIcon,
+            ),
+            ctx.slots.register({ name: 'main', key: leftEntry.id }, SeoWorkbenchBody),
+          ];
+
+          // Right sidebar tab type + its body.
+          const rightDisposers = [
             ctx.sidebarRightTabs.register(definition),
             ctx.slots.register({ name: 'sidebar.right.pane.tab', key: definition.id }, SeoWorkbenchBody),
           ];
+
+          const disposers = leftDisposers.concat(rightDisposers);
           return () => {
             for (const dispose of disposers) dispose();
             style.remove();

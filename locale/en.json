@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "SEO Analysis",
-    "description": "Run a technical SEO audit of any website in the right sidebar: crawlability and indexing, technical foundations, on-page and content checks, a weighted score, and prioritized fix suggestions. Enter a URL to start the audit.",
+    "description": "Run a technical SEO audit of any website from the left navigation sidebar or the right sidebar: crawlability and indexing, technical foundations, on-page and content checks, a weighted score, and prioritized fix suggestions. Enter a URL to start the audit.",
     "detail": "docs/DETAIL.md"
   }
 }

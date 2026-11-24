@@ -1,17 +1,19 @@
 # dsh-seo-workbench
 
-A DeepSeek Harness plugin that runs technical SEO audits of websites in the right sidebar.
+A DeepSeek Harness plugin that runs technical SEO audits of websites from a dedicated workbench.
+
+- **Left sidebar**: a **SEO 分析** navigation row (same surface as Plugins/Settings) opens the workbench page in the central column
+- **Right sidebar**: the same-name **SEO 分析** tab opens the compact panel
 
 - Package: `@local/seo-workbench`
-- Tab: 「SEO 分析」 in the right sidebar (installed via the plugin manager as a local bundle)
 - Host half: audit engine (fetch → parse → 21 checks in 4 weighted groups → score → issues), runs in the DSH process
-- Client half: sidebar tab UI, calls the engine over the Host's local web server
+- Client half: left-sidebar row + right-sidebar tab (shared panel UI), calls the engine over the Host's local web server
 
 ## Usage
 
-1. Open the right sidebar and pick the **SEO 分析** tab.
+1. Open the **SEO 分析** workbench — from the left navigation sidebar row, or from the right sidebar tab.
 2. Enter a URL (scheme is optional, `https://` is assumed) and click **分析**.
-3. The panel shows a 0–100 weighted total score, four group scores, a prioritized issue list
+3. The workbench shows a 0–100 weighted total score, four group scores, a prioritized issue list
    (severity + impact → evidence → fix), the per-check detail, and a page overview.
 4. **导出 .md** downloads a full Markdown report; **复制** copies it to the clipboard.
 5. **深度检测（CWV）** runs a Google PageSpeed Insights check (real Core Web Vitals,
@@ -56,7 +58,8 @@ row `config` object — add a `config:` block to the patch row in the profile's
 3. Host → Client channel (webServer routes + same-origin fetch) — done
 4. Client panel UI — done
 5. Polish: locales, DETAIL.md, previews, icon — done
-6. Formal install verification — **pending: restart DSH desktop app, then verify live routes**
+6. Formal install verification — done (live audit + deep routes verified)
+7. Left-sidebar entry + right-sidebar tab — done (waiting on page reload to see the row)
 
 ## Notes & limitations
 
@@ -79,7 +82,7 @@ row `config` object — add a `config:` block to the patch row in the profile's
 | `lib/checks.js` | The 21 checks + group weights |
 | `lib/score.js` | Weighted scoring |
 | `lib/psi.js` | PageSpeed Insights deep check |
-| `client.js` | Client half: sidebar tab registration and panel UI |
+| `client.js` | Client half: left-sidebar row + `main` panel + right-sidebar tab (shared UI) |
 | `locale/*.json` | Bundle metadata (`meta.title`, `meta.description`, `meta.detail`) |
 | `docs/DETAIL.md` (+ zh) | Plugin detail page |
 | `docs/preview.svg` (+ zh) | Detail preview illustration |
