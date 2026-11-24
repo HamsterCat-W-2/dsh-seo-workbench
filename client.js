@@ -173,7 +173,7 @@ window.__ModuleLoader__.load({
       textarea.remove();
     }
 
-    function buildMarkdown(report, deep) {
+    function buildMarkdown(report, deep, adviceText) {
       const L = [];
       L.push(`# SEO 分析报告 — ${report.url}`);
       L.push('');
@@ -239,6 +239,12 @@ window.__ModuleLoader__.load({
         if (deep.lighthouseIssues && deep.lighthouseIssues.length) {
           L.push(`- Lighthouse 失败项：${deep.lighthouseIssues.map((i) => (i && i.title) || String(i)).join('、')}`);
         }
+        L.push('');
+      }
+      if (adviceText) {
+        L.push('## AI 建议');
+        L.push('');
+        L.push(adviceText.trim());
         L.push('');
       }
       if ((report.notes || []).length) {
@@ -680,6 +686,14 @@ window.__ModuleLoader__.load({
       function pushHistory(entry) {
         setHistory((prev) => [entry, ...prev.filter((x) => x.id !== entry.id)].slice(0, 20));
       }
+      // Deep-check and AI advice complete AFTER the audit created the entry, so
+      // they are merged into the stored entry by its id instead of creating a new one.
+      function patchHistory(id, patch) {
+        setHistory((prev) => prev.map((entry) => (entry.id === id ? { ...entry, ...patch } : entry)));
+      }
+      function reportEntryId(reportValue) {
+        return reportValue ? `${reportValue.fetchedAt}-${reportValue.url}` : null;
+      }
 
       async function runAudit() {
         const { url, error: urlError } = normalizeUrl(input);
@@ -709,6 +723,8 @@ window.__ModuleLoader__.load({
             fetchedAt: data.fetchedAt,
             score: data.score && data.score.total,
             report: data,
+            deep: null,
+            advice: null,
           });
         } catch (err) {
           setError(err.message || String(err));
@@ -735,6 +751,8 @@ window.__ModuleLoader__.load({
             return;
           }
           setDeep(data);
+          const entryId = reportEntryId(report);
+          if (entryId) patchHistory(entryId, { deep: data });
         } catch (err) {
           setError(err.message || String(err));
         } finally {
@@ -760,6 +778,8 @@ window.__ModuleLoader__.load({
           });
           if (data.status === 'error') throw new Error((data.error && data.error.message) || 'AI 建议失败');
           setAdvice({ loading: false, text: data.text || '', error: null });
+          const entryId = reportEntryId(report);
+          if (entryId) patchHistory(entryId, { advice: { text: data.text || '', model: modelSel } });
         } catch (err) {
           setAdvice({ loading: false, text: '', error: err.message || String(err) });
         } finally {
@@ -773,8 +793,8 @@ window.__ModuleLoader__.load({
       function openHistory(entry) {
         setInput(entry.url);
         setReport(entry.report);
-        setDeep(null);
-        setAdvice({ loading: false, text: '', error: null });
+        setDeep(entry.deep || null);
+        setAdvice({ loading: false, text: (entry.advice && entry.advice.text) || '', error: null });
         setTab('issues');
         setOpenIssue(null);
         setOpenGroup(null);
@@ -782,11 +802,11 @@ window.__ModuleLoader__.load({
       }
       function exportMd() {
         if (!report) return;
-        downloadText(`seo-report-${domainOf(report.url)}-${new Date().toISOString().slice(0, 10)}.md`, buildMarkdown(report, deep));
+        downloadText(`seo-report-${domainOf(report.url)}-${new Date().toISOString().slice(0, 10)}.md`, buildMarkdown(report, deep, advice.text));
       }
       function copyMd() {
         if (!report) return;
-        copyText(buildMarkdown(report, deep));
+        copyText(buildMarkdown(report, deep, advice.text));
         setCopied('md');
         setTimeout(() => setCopied(null), 1500);
       }
@@ -1075,6 +1095,12 @@ window.__ModuleLoader__.load({
                           { type: 'button', className: 'seo-wb-history-main', onClick: () => openHistory(entry) },
                           h('span', { className: 'seo-wb-history-domain' }, domainOf(entry.url)),
                           h('span', { className: 'seo-wb-history-time' }, fmtTime(entry.fetchedAt)),
+                          entry.deep && entry.deep.status === 'ok'
+                            ? h('span', { className: 'seo-wb-history-badge seo-wb-badge-deep', title: '已保存深度检测（CWV）结果' }, '深度')
+                            : null,
+                          entry.advice && entry.advice.text
+                            ? h('span', { className: 'seo-wb-history-badge seo-wb-badge-advice', title: '已保存 AI 建议' }, 'AI')
+                            : null,
                         ),
                         entry.score !== undefined && entry.score !== null
                           ? h('span', { className: `seo-wb-score-chip seo-wb-score-chip-${scoreColor(entry.score)}` }, String(Math.round(entry.score)))
@@ -1224,6 +1250,9 @@ window.__ModuleLoader__.load({
 .seo-wb-history-main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; border: 0; background: none; font-family: inherit; cursor: pointer; color: var(--dsw-alias-label-primary); padding: 2px 0; text-align: left; }
 .seo-wb-history-domain { font-size: 14px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .seo-wb-history-time { font-size: 12px; color: var(--dsw-alias-label-secondary); flex-shrink: 0; }
+.seo-wb-history-badge { font-size: 11px; line-height: 1; padding: 3px 6px; border-radius: 6px; flex-shrink: 0; }
+.seo-wb-badge-deep { color: var(--dsw-alias-state-success-primary); background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 12%, transparent); }
+.seo-wb-badge-advice { color: var(--dsw-alias-brand-primary); background: color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent); }
 .seo-wb-score-chip { font-size: 12px; font-weight: 700; padding: 2px 10px; border-radius: 999px; border: 1px solid; flex-shrink: 0; }
 .seo-wb-score-chip-ok { color: var(--dsw-alias-state-success-primary); border-color: var(--dsw-alias-state-success-primary); }
 .seo-wb-score-chip-warn { color: var(--dsw-alias-state-warn-primary); border-color: var(--dsw-alias-state-warn-primary); }
