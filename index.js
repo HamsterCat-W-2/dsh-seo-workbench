@@ -9,18 +9,18 @@
  *   POST /seo-workbench/api/deep   { url } → PageSpeed Insights result (CWV + Lighthouse + schema)
  */
 
-import z from '@deepseek-ai/schemastery';
 import { runAudit, runPageSpeed } from './lib/engine.js';
 
 export const inject = ['webServer'];
 
-/** Row config schema (DSH validates it at activation; absent fields fall back to defaults). */
-export const Config = z.object({
-  fetchTimeoutMs: z.number().default(15000).description('Per-request fetch timeout in milliseconds.'),
-  maxRedirects: z.number().default(5).description('Maximum redirect hops followed per page fetch.'),
-  userAgent: z.string().default('').description('Override the User-Agent (empty uses the built-in Chrome-like agent).'),
-  psiKey: z.string().default('').description('Google PageSpeed Insights API key for the deep check (optional).'),
-});
+/*
+ * NOTE: no `Config` schema export on purpose — linked bundles must not import
+ * external @deepseek-ai/* packages (default node resolution walks the real
+ * path, so e.g. @deepseek-ai/schemastery cannot be resolved from the linked
+ * package dir, and the row fails activation). Tunables are read from the row
+ * `config` object below (a patch row may still carry `config: { … }` — it is
+ * passed to apply even without a Config schema) and from environment vars.
+ */
 
 const API = '/seo-workbench/api/';
 
@@ -101,7 +101,7 @@ export function apply(ctx, config = {}) {
       ctx.webServer.register({
         kind: 'exact',
         path: `${API}deep`,
-        handler: createUrlHandler((url) => runPageSpeed(url, { key: config.psiKey || undefined }), {}),
+        handler: createUrlHandler((url) => runPageSpeed(url, { key: config.psiKey || process.env.PSI_API_KEY || undefined }), {}),
       }),
     'seo-workbench: deep route',
   );
