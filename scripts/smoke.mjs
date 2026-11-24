@@ -10,6 +10,7 @@
 
 import http from 'node:http';
 import { runAudit } from '../lib/engine.js';
+import { hasMixedContent } from '../lib/parse.js';
 
 const PAGE = `<!doctype html>
 <html>
@@ -24,6 +25,34 @@ const PAGE = `<!doctype html>
   <a href="/internal">内链</a><a href="https://example.com/external" rel="nofollow">外链</a>
   <p>正文内容</p>
 </body>
+</html>`;
+
+const GOOD_PAGE = (port) => `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>${'标'.repeat(55)}</title>
+  <meta name="description" content="${'述'.repeat(155)}">
+  <link rel="canonical" href="http://127.0.0.1:${port}/good">
+  <link rel="alternate" hreflang="en" href="http://127.0.0.1:${port}/good?lang=en">
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"Good","url":"http://127.0.0.1:${port}/good"}</script>
+</head>
+<body>
+  <h1>主标题</h1>
+  <h2>二级一</h2><h2>二级二</h2>
+  <a href="/good">内链</a>
+  <p>${'文'.repeat(340)}</p>
+</body>
+</html>`;
+
+const NOINDEX_PAGE = `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>禁索引测试页面标题用于验证检查器对 noindex 的识别是否准确可靠</title>
+  <meta name="robots" content="noindex, nofollow">
+</head>
+<body><h1>标题</h1><p>${'文'.repeat(340)}</p></body>
 </html>`;
 
 const server = http.createServer((req, res) => {
@@ -45,6 +74,17 @@ const server = http.createServer((req, res) => {
   if (url === '/old') {
     res.writeHead(301, { location: '/' });
     res.end();
+    return;
+  }
+  if (url === '/good') {
+    const port = server.address().port;
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end(GOOD_PAGE(port));
+    return;
+  }
+  if (url === '/noindex') {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end(NOINDEX_PAGE);
     return;
   }
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
@@ -83,6 +123,34 @@ try {
 
   const bad = await runAudit('ftp://example.com', { timeoutMs: 5000 });
   assert(bad.status === 'error' && bad.error.code === 'unsupported-protocol', '非 http/https 应返回 unsupported-protocol');
+
+  // A page that should mostly pass: schema + canonical + hreflang + healthy title/desc/H1.
+  const good = await runAudit(`${base}/good`, { timeoutMs: 5000 });
+  const goodChecks = Object.fromEntries(
+    good.groups.flatMap((g) => g.checks.map((c) => [c.id, c.status])),
+  );
+  assert(good.page.httpStatus === 200, 'good 页 HTTP 状态应为 200');
+  for (const id of ['schema', 'title-length', 'meta-description', 'h1', 'heading-hierarchy', 'canonical']) {
+    assert(goodChecks[id] === 'pass', `good 页 ${id} 检查应为 pass，实际 ${goodChecks[id]}`);
+  }
+  assert(good.page.hreflangs.length === 1, '应检测到 1 个 hreflang');
+  assert(
+    !good.issues.some((i) => ['title-length', 'meta-description', 'h1'].includes(i.id)),
+    'good 页不应产生 title/meta/H1 问题',
+  );
+
+  // noindex must surface as a critical crawl issue.
+  const noindex = await runAudit(`${base}/noindex`, { timeoutMs: 5000 });
+  const mr = noindex.issues.find((i) => i.id === 'meta-robots');
+  assert(mr, 'noindex 页应产生 meta-robots 问题');
+  assert(mr.severity === 'critical', `meta-robots 严重度应为 critical，实际 ${mr.severity}`);
+
+  // Mixed-content scope: subresources only, not plain external links.
+  assert(hasMixedContent('<a href="http://plain.example">link</a>') === false, '普通外链不算混合内容');
+  assert(hasMixedContent('<link rel="canonical" href="http://x/">') === false, 'canonical 链接不算混合内容');
+  assert(hasMixedContent('<img src="http://x/a.png">') === true, 'img src=http 是混合内容');
+  assert(hasMixedContent('<script src="http://x/a.js"></script>') === true, 'script src=http 是混合内容');
+  assert(hasMixedContent('<link rel="stylesheet" href="http://x/a.css">') === true, 'stylesheet href=http 是混合内容');
 
   console.log('PASS smoke test');
   console.log(
