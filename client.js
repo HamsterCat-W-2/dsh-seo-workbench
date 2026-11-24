@@ -463,7 +463,14 @@ window.__ModuleLoader__.load({
     function DeepSection({ deep }) {
       if (!deep) return null;
       if (deep.status === 'error') {
-        return h('div', { className: 'seo-wb-deep-error' }, mapDeepError(deep.error));
+        const msg = mapDeepError(deep.error);
+        const hint = deep.error && deep.error.hint ? deep.error.hint : '';
+        return h(
+          'div',
+          { className: 'seo-wb-deep-error' },
+          msg,
+          hint ? h('div', { className: 'seo-wb-deep-hint' }, hint) : null,
+        );
       }
       const cats = [['Performance', deep.performance], ['SEO', deep.seo], ['Accessibility', deep.accessibility], ['Best Practices', deep.bestPractices]];
       return h(
@@ -588,6 +595,11 @@ window.__ModuleLoader__.load({
       const [settingsOpen, setSettingsOpen] = useState(false);
       const [settings, setSettings] = useState(() => ({ ...DEFAULT_SETTINGS, ...lsGet(LS_SETTINGS, {}) }));
       const [history, setHistory] = useState(() => lsGet(LS_HISTORY, []));
+      const [historyOpen, setHistoryOpen] = useState(true);
+      const [testOpen, setTestOpen] = useState(false);
+      const [testDraft, setTestDraft] = useState('');
+      const [testBusy, setTestBusy] = useState(false);
+      const [testResult, setTestResult] = useState(null);
       const [models, setModels] = useState({ providers: [] });
       const [modelSel, setModelSel] = useState(() => lsGet(LS_MODEL, '') || '');
 
@@ -748,6 +760,29 @@ window.__ModuleLoader__.load({
         copyText(advice.text);
         setCopied('advice');
         setTimeout(() => setCopied(null), 1500);
+      }
+      function runKeyTest() {
+        const key = String(testDraft || '').trim() || String(settings.psiKey || '').trim();
+        if (!key) {
+          setTestResult({ ok: false, text: '先粘贴你的 PageSpeed API Key 再测试' });
+          return;
+        }
+        setTestBusy(true);
+        setTestResult(null);
+        postJson('/seo-workbench/api/testkey', { psiKey: key })
+          .then((data) => {
+            if (data && data.status === 'ok') {
+              setTestResult({ ok: true, text: data.verdict || '这个 Key 可用' });
+            } else {
+              const err = (data && data.error) || {};
+              const hint = err.hint || '';
+              setTestResult({ ok: false, text: [err.message || '测试失败', hint].filter(Boolean).join('；') });
+            }
+          })
+          .catch((err) => {
+            setTestResult({ ok: false, text: '无法连接宿主测试接口：' + String((err && err.message) || err) });
+          })
+          .finally(() => setTestBusy(false));
       }
 
       const modelOptions = [];
@@ -927,39 +962,99 @@ window.__ModuleLoader__.load({
 
         h(
           'div',
-          { className: 'seo-wb-history' },
+          { className: 'seo-wb-bottom' },
           h(
             'div',
-            { className: 'seo-wb-history-head' },
-            h('div', { className: 'seo-wb-section-title' }, '分析历史'),
-            history.length ? h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-mini', onClick: () => setHistory([]) }, '清空') : null,
-          ),
-          history.length
-            ? h(
-                'div',
-                { className: 'seo-wb-history-list' },
-                history.map((entry) =>
+            { className: 'seo-wb-panel' },
+            h(
+              'div',
+              { className: 'seo-wb-panel-head' },
+              h('div', { className: 'seo-wb-section-title' }, '测试 Key'),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'seo-wb-btn seo-wb-btn-mini seo-wb-collapse',
+                  onClick: () => setTestOpen((v) => !v),
+                  'aria-expanded': testOpen,
+                  'aria-label': testOpen ? '收起测试 Key' : '展开测试 Key',
+                },
+                testOpen ? '收起 ▾' : '展开 ▸',
+              ),
+            ),
+            testOpen
+              ? h(
+                  'div',
+                  { className: 'seo-wb-test-body' },
+                  h('input', {
+                    className: 'seo-wb-input seo-wb-test-input',
+                    value: testDraft,
+                    onChange: (e) => setTestDraft(e.target.value),
+                    placeholder: settings.psiKey ? '留空则测试已保存的 Key' : '粘贴你的 PageSpeed API Key',
+                    maxLength: 128,
+                    'aria-label': '测试用的 PageSpeed API Key',
+                    spellCheck: false,
+                  }),
                   h(
-                    'div',
-                    { key: entry.id, className: 'seo-wb-history-row' },
-                    h(
-                      'button',
-                      { type: 'button', className: 'seo-wb-history-main', onClick: () => openHistory(entry) },
-                      h('span', { className: 'seo-wb-history-domain' }, domainOf(entry.url)),
-                      h('span', { className: 'seo-wb-history-time' }, fmtTime(entry.fetchedAt)),
-                    ),
-                    entry.score !== undefined && entry.score !== null
-                      ? h('span', { className: `seo-wb-score-chip seo-wb-score-chip-${scoreColor(entry.score)}` }, String(Math.round(entry.score)))
-                      : null,
-                    h(
-                      'button',
-                      { type: 'button', className: 'seo-wb-history-del', onClick: () => removeHistory(entry.id), 'aria-label': `删除 ${entry.url}` },
-                      '✕',
-                    ),
+                    'button',
+                    { type: 'button', className: 'seo-wb-btn', onClick: runKeyTest, disabled: testBusy },
+                    testBusy ? '测试中…' : '测试',
                   ),
-                ),
-              )
-            : h('div', { className: 'seo-wb-empty' }, '还没有分析记录 — 输入网址开始第一次分析'),
+                  testResult
+                    ? h('div', { className: `seo-wb-test-result ${testResult.ok ? 'seo-wb-test-ok' : 'seo-wb-test-err'}` }, testResult.text)
+                    : null,
+                )
+              : null,
+          ),
+          h(
+            'div',
+            { className: 'seo-wb-panel' },
+            h(
+              'div',
+              { className: 'seo-wb-panel-head' },
+              h('div', { className: 'seo-wb-section-title' }, '分析历史'),
+              history.length ? h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-mini', onClick: () => setHistory([]) }, '清空') : null,
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'seo-wb-btn seo-wb-btn-mini seo-wb-collapse',
+                  onClick: () => setHistoryOpen((v) => !v),
+                  'aria-expanded': historyOpen,
+                  'aria-label': historyOpen ? '收起分析历史' : '展开分析历史',
+                },
+                historyOpen ? '收起 ▾' : '展开 ▸',
+              ),
+            ),
+            historyOpen
+              ? history.length
+                ? h(
+                    'div',
+                    { className: 'seo-wb-history-list' },
+                    history.map((entry) =>
+                      h(
+                        'div',
+                        { key: entry.id, className: 'seo-wb-history-row' },
+                        h(
+                          'button',
+                          { type: 'button', className: 'seo-wb-history-main', onClick: () => openHistory(entry) },
+                          h('span', { className: 'seo-wb-history-domain' }, domainOf(entry.url)),
+                          h('span', { className: 'seo-wb-history-time' }, fmtTime(entry.fetchedAt)),
+                        ),
+                        entry.score !== undefined && entry.score !== null
+                          ? h('span', { className: `seo-wb-score-chip seo-wb-score-chip-${scoreColor(entry.score)}` }, String(Math.round(entry.score)))
+                          : null,
+                        h(
+                          'button',
+                          { type: 'button', className: 'seo-wb-history-del', onClick: () => removeHistory(entry.id), 'aria-label': `删除 ${entry.url}` },
+                          '✕',
+                        ),
+                      ),
+                    ),
+                  )
+                : h('div', { className: 'seo-wb-empty' }, '还没有分析记录 — 输入网址开始第一次分析')
+              : null,
+          ),
         ),
       );
     }
@@ -1078,8 +1173,16 @@ window.__ModuleLoader__.load({
 .seo-wb-note { font-size: 13px; color: var(--dsw-alias-label-secondary); line-height: 1.5; }
 .seo-wb-empty { margin-top: 12px; padding: 18px; border: 1px dashed var(--dsw-alias-border-l1); border-radius: 10px; color: var(--dsw-alias-label-secondary); font-size: 13px; text-align: center; }
 .seo-wb-empty-hero { padding: 32px 18px; font-size: 14px; }
-.seo-wb-history { margin-top: 24px; }
-.seo-wb-history-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.seo-wb-bottom { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; margin-top: 24px; align-items: start; }
+.seo-wb-panel { background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l1); border-radius: 12px; padding: 12px 14px; min-width: 0; }
+.seo-wb-panel-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.seo-wb-collapse { margin-left: auto; }
+.seo-wb-test-body { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.seo-wb-test-input { flex: 1; min-width: 160px; }
+.seo-wb-test-result { margin-top: 10px; font-size: 12px; line-height: 1.6; padding: 8px 10px; border-radius: 8px; }
+.seo-wb-test-ok { color: var(--dsw-alias-state-success-primary); background: rgba(46, 160, 67, .12); }
+.seo-wb-test-err { color: var(--dsw-alias-state-error-primary); background: rgba(218, 54, 51, .10); }
+.seo-wb-deep-hint { margin-top: 8px; font-size: 12px; line-height: 1.6; color: var(--dsw-alias-label-secondary); }
 .seo-wb-history-list { display: flex; flex-direction: column; gap: 6px; }
 .seo-wb-history-row { display: flex; align-items: center; gap: 10px; background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l1); border-radius: 10px; padding: 8px 12px; }
 .seo-wb-history-row:hover { border-color: var(--dsw-alias-border-l2); }

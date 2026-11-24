@@ -9,6 +9,7 @@
  *   POST /seo-workbench/api/deep     { url, psiKey? } → PageSpeed Insights result (CWV + Lighthouse + schema)
  *   GET  /seo-workbench/api/models   → { status, providers: [{ id, name, models: [{ id, name }] }] }
  *   POST /seo-workbench/api/advice   { url, report, model: { provider, model } } → { status, text }
+ *   POST /seo-workbench/api/testkey  { psiKey } → { status, verdict } | { status, error: { code, message, hint } }
  *
  * Model catalog and AI advice come from the Host `llm` service (injected below).
  * Messages are built as plain objects and text chunks are accumulated defensively
@@ -113,6 +114,30 @@ function messageText(chunk) {
     .join('');
 }
 
+/** Map a Google PageSpeed error message to an actionable Chinese hint. */
+function explainPsiError(message) {
+  const m = String(message || '');
+  if (/quota\s+exceeded/i.test(m)) {
+    return 'PageSpeed 免费匿名配额已用尽（报错来自匿名身份或该 key 所属的项目）。请填写你自己的 API Key（设置 → PageSpeed API Key），或在 Google Cloud 新建一个项目的 key。';
+  }
+  if (/permission denied on the service/i.test(m)) {
+    return '这个 key 被「应用限制」挡住了：HTTP referrer / IP 限制对本地宿主发出的请求无效（请求没有浏览器 referrer）。请到 Google Cloud → API 和服务 → 凭据 → 编辑该 key：应用限制选「无」，API 限制只保留 PageSpeed Insights API。保存后一般 1–5 分钟生效。';
+  }
+  if (/api key not valid|invalid api key/i.test(m)) {
+    return '这个 key 无效或复制不完整：请重新复制以 AIza 开头的一整串 key（不要带空格或换行）。';
+  }
+  if (/has not been used in project|not been enabled|not enabled/i.test(m)) {
+    return '该 key 所属的 Google Cloud 项目没有启用 PageSpeed Insights API：请到 Google Cloud → API 和服务 → 库 → 搜索并启用「PageSpeed Insights API」（注意是 key 所在的那个项目）。';
+  }
+  if (/requests from referer/i.test(m)) {
+    return '这个 key 限制了 HTTP referrer：到 Google Cloud 编辑 key，把应用限制改为「无」。';
+  }
+  if (/billing/i.test(m)) {
+    return '该 key 的项目需要启用结算（Billing）：到 Google Cloud 绑定结算账号后再试（PSI 免费额度一般不需要，但被组织策略限制时会出现这条）。';
+  }
+  return '';
+}
+
 function buildAdvicePrompt(url, report) {
   const score = report && report.score ? report.score : {};
   const groups = Array.isArray(report && report.groups) ? report.groups : [];
@@ -166,17 +191,67 @@ export function apply(ctx, config = {}) {
   );
 
   // POST /api/deep — body may carry a user-provided PageSpeed API key.
+  // Errors keep Google's message verbatim and attach an actionable hint.
   ctx.effect(
     () =>
       ctx.webServer.register({
         kind: 'exact',
         path: `${API}deep`,
-        handler: createUrlHandler((url, body) => {
+        handler: createUrlHandler(async (url, body) => {
           const key = (body && typeof body.psiKey === 'string' && body.psiKey.trim()) || basePsiKey;
-          return runPageSpeed(url, { key });
+          const result = await runPageSpeed(url, { key });
+          if (result && result.status === 'error' && result.error) {
+            return {
+              ...result,
+              error: { ...result.error, hint: explainPsiError(result.error.message) },
+            };
+          }
+          return result;
         }),
       }),
     'seo-workbench: deep route',
+  );
+
+  // POST /api/testkey — validate a PageSpeed API key with a minimal request,
+  // so the user never has to debug Google Cloud blindly.
+  ctx.effect(
+    () =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path: `${API}testkey`,
+        handler: (req, res) => {
+          if (req.method !== 'POST') {
+            sendJson(res, 405, { error: 'method-not-allowed' });
+            return;
+          }
+          readBody(req)
+            .then(async (raw) => {
+              let body;
+              try {
+                body = JSON.parse(raw || '{}');
+              } catch {
+                sendJson(res, 400, { status: 'error', error: { code: 'bad-json', message: 'invalid JSON' } });
+                return;
+              }
+              const key = body && typeof body.psiKey === 'string' ? body.psiKey.trim() : '';
+              if (!key) {
+                sendJson(res, 400, { status: 'error', error: { code: 'missing-key', message: '请输入要测试的 PageSpeed API Key' } });
+                return;
+              }
+              const result = await runPageSpeed('https://example.com/', { key, timeoutMs: 30000 });
+              if (result.status === 'ok') {
+                sendJson(res, 200, { status: 'ok', verdict: '这个 Key 可用：PageSpeed 正常返回了结果。' });
+              } else {
+                sendJson(res, 200, {
+                  status: 'error',
+                  error: { ...result.error, hint: explainPsiError(result.error.message) },
+                });
+              }
+            })
+            .catch(() => sendJson(res, 400, { status: 'error', error: { code: 'bad-body', message: 'invalid body' } }));
+        },
+      }),
+    'seo-workbench: testkey route',
   );
 
   // GET /api/models — live provider/model catalog from the Host llm service.
