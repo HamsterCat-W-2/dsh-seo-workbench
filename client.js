@@ -371,8 +371,12 @@ window.__ModuleLoader__.load({
 
     function DeepSection({ deep }) {
       if (deep.status === 'error') {
+        const raw = (deep.error && deep.error.message) || '未知错误';
+        const msg = /quota\s+exceeded/i.test(raw)
+          ? 'PageSpeed 免费匿名配额已用尽。在插件行配置（profile cordis.patch.yml 的 seo-workbench 行加 config.psiKey）或环境变量 PSI_API_KEY 中配置你自己的 API Key 后再试。'
+          : raw;
         return el('div', { className: 'seo-wb-card' },
-          el('div', { className: 'seo-wb-error' }, `深度检测失败：${(deep.error && deep.error.message) || '未知错误'}`),
+          el('div', { className: 'seo-wb-error' }, `深度检测失败：${msg}`),
         );
       }
       const cwv = deep.cwv;
