@@ -11,14 +11,23 @@ A DeepSeek Harness plugin that runs technical SEO audits of websites from a dedi
 ## Usage
 
 1. Click **SEO 分析** in the left navigation sidebar to open the workbench page.
-2. Enter a URL (scheme is optional, `https://` is assumed) and click **分析**.
+2. Enter a URL (scheme is optional, `https://` is assumed) and click **分析**. While it runs,
+   the analysis pipeline is shown as a step flow (fetch → parse → robots/sitemap → checks → score).
 3. The workbench shows a 0–100 weighted total score, four group scores, a prioritized issue list
    (severity + impact → evidence → fix), the per-check detail, and a page overview.
 4. **导出 .md** downloads a full Markdown report; **复制** copies it to the clipboard.
 5. **深度检测（CWV）** runs a Google PageSpeed Insights check (real Core Web Vitals,
    Lighthouse category scores, and a fallback JSON-LD detection). It works without a key at
-   reduced quota; set `PSI_API_KEY` in the environment (or a plugin row `config.psiKey`)
-   for the official quota.
+   reduced quota; set `PSI_API_KEY` in the environment (or the settings panel / a plugin row
+   `config.psiKey`) for the official quota.
+6. **AI 建议** sends the report to the model selected in the top bar and returns a prioritized
+   fix plan. The model dropdown is fed by the Host's live provider/model catalog
+   (`/seo-workbench/api/models`).
+7. **分析历史** keeps the last 20 audits (localStorage); click a row to restore its report,
+   delete a single row, or clear all.
+8. **⚙ 设置** configures a default site (prefills the input), a PageSpeed API Key, the fetch
+   timeout, and the max redirect count. Settings persist in localStorage and override the row
+   `config` per request.
 
 ## Configuration
 
@@ -39,7 +48,10 @@ row `config` object — add a `config:` block to the patch row in the profile's
         psiKey: ''              # PageSpeed Insights key (or env PSI_API_KEY)
 ```
 
-`PSI_API_KEY` from the environment is used when `config.psiKey` is empty.
+`PSI_API_KEY` from the environment is used when `config.psiKey` is empty. The in-app
+**⚙ 设置** panel (client-side, localStorage `seo-wb-settings`) supplies the default site,
+PageSpeed key, timeout, and redirect limit; the key and the fetch tunables are sent with each
+request and override the row config for that call.
 
 ## Check inventory
 
@@ -58,7 +70,8 @@ row `config` object — add a `config:` block to the patch row in the profile's
 4. Client panel UI — done
 5. Polish: locales, DETAIL.md, previews, icon — done
 6. Formal install verification — done (live audit + deep routes verified)
-7. Left-sidebar entry (`sidebar.panellist` row + `main` panel) — done (waiting on page reload to see the row)
+7. Left-sidebar entry (`sidebar.panellist` row + `main` panel) — done
+8. UI redesign: top bar (model select + settings), input + analyze, history, pipeline progress, AI 建议 — done (Host restart needed for the new `/models` + `/advice` routes)
 
 ## Notes & limitations
 
@@ -74,7 +87,7 @@ row `config` object — add a `config:` block to the patch row in the profile's
 
 | File | Purpose |
 |---|---|
-| `index.js` | Host half: webServer routes (`/seo-workbench/api/audit`, `/deep`) |
+| `index.js` | Host half: webServer routes (`/seo-workbench/api/audit`, `/deep`, `/models`, `/advice`) |
 | `lib/engine.js` | `runAudit()` orchestration |
 | `lib/fetch.js` | HTTP fetch w/ redirect chain, timeout, size cap |
 | `lib/parse.js` | Dependency-free HTML / robots.txt / sitemap parsing |
