@@ -1,6 +1,6 @@
 ![SEO workbench panel: score ring, group score bars, issue list](preview.svg)
 
-Open the workbench page from the **SEO 分析** row in the left navigation sidebar, or from the same-name tab in the right sidebar, and run a technical SEO audit of any website.
+Open the workbench page from the **SEO 分析** row in the left navigation sidebar, and run a technical SEO audit of any website.
 
 What gets checked (four weighted groups):
 

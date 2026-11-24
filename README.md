@@ -2,16 +2,15 @@
 
 A DeepSeek Harness plugin that runs technical SEO audits of websites from a dedicated workbench.
 
-- **Left sidebar**: a **SEO 分析** navigation row (same surface as Plugins/Settings) opens the workbench page in the central column
-- **Right sidebar**: the same-name **SEO 分析** tab opens the compact panel
+- **Entry point**: a **SEO 分析** row in the left navigation sidebar (same surface as Plugins/Settings) opens the workbench page in the central column
 
 - Package: `@local/seo-workbench`
 - Host half: audit engine (fetch → parse → 21 checks in 4 weighted groups → score → issues), runs in the DSH process
-- Client half: left-sidebar row + right-sidebar tab (shared panel UI), calls the engine over the Host's local web server
+- Client half: left-sidebar row + central panel UI, calls the engine over the Host's local web server
 
 ## Usage
 
-1. Open the **SEO 分析** workbench — from the left navigation sidebar row, or from the right sidebar tab.
+1. Click **SEO 分析** in the left navigation sidebar to open the workbench page.
 2. Enter a URL (scheme is optional, `https://` is assumed) and click **分析**.
 3. The workbench shows a 0–100 weighted total score, four group scores, a prioritized issue list
    (severity + impact → evidence → fix), the per-check detail, and a page overview.
@@ -59,7 +58,7 @@ row `config` object — add a `config:` block to the patch row in the profile's
 4. Client panel UI — done
 5. Polish: locales, DETAIL.md, previews, icon — done
 6. Formal install verification — done (live audit + deep routes verified)
-7. Left-sidebar entry + right-sidebar tab — done (waiting on page reload to see the row)
+7. Left-sidebar entry (`sidebar.panellist` row + `main` panel) — done (waiting on page reload to see the row)
 
 ## Notes & limitations
 
@@ -82,7 +81,7 @@ row `config` object — add a `config:` block to the patch row in the profile's
 | `lib/checks.js` | The 21 checks + group weights |
 | `lib/score.js` | Weighted scoring |
 | `lib/psi.js` | PageSpeed Insights deep check |
-| `client.js` | Client half: left-sidebar row + `main` panel + right-sidebar tab (shared UI) |
+| `client.js` | Client half: left-sidebar row + `main` panel UI |
 | `locale/*.json` | Bundle metadata (`meta.title`, `meta.description`, `meta.detail`) |
 | `docs/DETAIL.md` (+ zh) | Plugin detail page |
 | `docs/preview.svg` (+ zh) | Detail preview illustration |

@@ -584,28 +584,12 @@ window.__ModuleLoader__.load({
     }
 
     // ---------- registration ----------
-    // Both surfaces share the same body component:
-    //  - left sidebar: a `sidebar.panellist` navigation row (icon + label) whose
-    //    id opens the `main` central panel registered under the same key;
-    //  - right sidebar: a `sidebar.right.pane.tab` type opened from the tab strip.
+    // Left sidebar only: a `sidebar.panellist` navigation row (icon + label)
+    // whose id opens the `main` central panel registered under the same key.
     const leftEntry = {
       id: 'seo-workbench',
       order: 10,
       label: 'SEO 分析',
-    };
-
-    const definition = {
-      id: 'seo-workbench',
-      kind: 'seo-workbench',
-      title: () => 'SEO 分析',
-      guide: [
-        {
-          id: 'seo-workbench',
-          order: 0,
-          title: () => 'SEO 分析',
-          description: () => '对网站做技术 SEO 体检：可抓取性、技术基础、On-Page 与内容质量，给出评分和修复建议。',
-        },
-      ],
     };
 
     const CSS = `
@@ -661,29 +645,22 @@ window.__ModuleLoader__.load({
 `;
 
     return {
-      inject: ['slots', 'sidebarRightTabs', 'sidebarRight'],
+      inject: ['slots'],
       apply(ctx) {
         ctx.effect(() => {
           const style = document.createElement('style');
           style.textContent = CSS;
           document.head.appendChild(style);
 
-          // Left sidebar row + its central page.
-          const leftDisposers = [
+          // Left sidebar row + its central page. Selecting a missing `main`
+          // entry throws, so both are registered together.
+          const disposers = [
             ctx.slots.register(
               { name: 'sidebar.panellist', id: leftEntry.id, order: leftEntry.order, label: leftEntry.label },
               SeoWorkbenchIcon,
             ),
             ctx.slots.register({ name: 'main', key: leftEntry.id }, SeoWorkbenchBody),
           ];
-
-          // Right sidebar tab type + its body.
-          const rightDisposers = [
-            ctx.sidebarRightTabs.register(definition),
-            ctx.slots.register({ name: 'sidebar.right.pane.tab', key: definition.id }, SeoWorkbenchBody),
-          ];
-
-          const disposers = leftDisposers.concat(rightDisposers);
           return () => {
             for (const dispose of disposers) dispose();
             style.remove();
