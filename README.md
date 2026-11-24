@@ -26,7 +26,8 @@ A DeepSeek Harness plugin that runs technical SEO audits of websites from a dedi
    fix plan. The model dropdown is fed by the Host's live provider/model catalog
    (`/seo-workbench/api/models`).
 7. **分析历史** keeps the last 20 audits (localStorage); click a row to restore its report,
-   delete a single row, or clear all.
+   delete a single row, or clear all. 深度检测 and AI 建议 results are saved into the same
+   entry — badges `深度` / `AI` mark which ones the entry already has.
 8. **⚙ 设置** configures a default site (prefills the input), a PageSpeed API Key, the fetch
    timeout, and the max redirect count. Settings persist in localStorage and override the row
    `config` per request.
