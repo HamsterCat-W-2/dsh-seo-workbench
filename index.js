@@ -9,9 +9,18 @@
  *   POST /seo-workbench/api/deep   { url } → PageSpeed Insights result (CWV + Lighthouse + schema)
  */
 
+import z from '@deepseek-ai/schemastery';
 import { runAudit, runPageSpeed } from './lib/engine.js';
 
 export const inject = ['webServer'];
+
+/** Row config schema (DSH validates it at activation; absent fields fall back to defaults). */
+export const Config = z.object({
+  fetchTimeoutMs: z.number().default(15000).description('Per-request fetch timeout in milliseconds.'),
+  maxRedirects: z.number().default(5).description('Maximum redirect hops followed per page fetch.'),
+  userAgent: z.string().default('').description('Override the User-Agent (empty uses the built-in Chrome-like agent).'),
+  psiKey: z.string().default('').description('Google PageSpeed Insights API key for the deep check (optional).'),
+});
 
 const API = '/seo-workbench/api/';
 
