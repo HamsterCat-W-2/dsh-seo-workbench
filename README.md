@@ -16,10 +16,12 @@ A DeepSeek Harness plugin that runs technical SEO audits of websites from a dedi
 3. The workbench shows a 0–100 weighted total score, four group scores, a prioritized issue list
    (severity + impact → evidence → fix), the per-check detail, and a page overview.
 4. **导出 .md** downloads a full Markdown report; **复制** copies it to the clipboard.
-5. **深度检测（CWV）** runs a Google PageSpeed Insights check (real Core Web Vitals,
-   Lighthouse category scores, and a fallback JSON-LD detection). It works without a key at
-   reduced quota; set `PSI_API_KEY` in the environment (or the settings panel / a plugin row
-   `config.psiKey`) for the official quota.
+5. **深度检测（CWV）** measures real Core Web Vitals (LCP / CLS / TTFB / FCP + TBT)
+   in a throwaway headless checkout of the local **Google Chrome**, right on this machine —
+   no Google API key, no network quota, and it also sees JS-rendered JSON-LD schema.
+   A Google PageSpeed Insights fallback (and its optional key) is used only when Chrome
+   is unavailable; `<chrome path>` can be overridden with `SEO_WB_CHROME_PATH` or the plugin
+   row `config.chromePath`.
 6. **AI 建议** sends the report to the model selected in the top bar and returns a prioritized
    fix plan. The model dropdown is fed by the Host's live provider/model catalog
    (`/seo-workbench/api/models`).
@@ -45,13 +47,14 @@ row `config` object — add a `config:` block to the patch row in the profile's
         fetchTimeoutMs: 15000   # per-request timeout
         maxRedirects: 5         # redirect hops followed per page
         userAgent: ''           # empty = built-in Chrome-like UA
-        psiKey: ''              # PageSpeed Insights key (or env PSI_API_KEY)
+        psiKey: ''              # PageSpeed Insights key (only used when local Chrome is unavailable)
+        chromePath: ''          # optional override for the Chrome binary path (or env SEO_WB_CHROME_PATH)
 ```
 
-`PSI_API_KEY` from the environment is used when `config.psiKey` is empty. The in-app
-**⚙ 设置** panel (client-side, localStorage `seo-wb-settings`) supplies the default site,
-PageSpeed key, timeout, and redirect limit; the key and the fetch tunables are sent with each
-request and override the row config for that call.
+The deep check (`lib/localdeep.js`) is a one-shot headless Chrome run, so it measures a lab
+Core Web Vitals snapshot (LCP/CLS/TTFB/FCP + TBT). INP is interaction-driven and can't be
+measured by a lab run; the card shows `—` locally. Chrome is launched with `--no-sandbox`
+(a short-lived profiling instance, own throwaway profile dir, killed afterwards).
 
 ## Check inventory
 
@@ -76,8 +79,11 @@ request and override the row config for that call.
 ## Notes & limitations
 
 - Analysis reads the server-rendered HTML only (no JavaScript execution). JSON-LD injected by
-  client-side JS is not detected by the basic audit; the deep check falls back to PSI's
-  structured-data audit.
+  client-side JS is not detected by the basic audit; the deep check (local Chrome) runs the
+  page and sees the rendered JSON-LD, and the result is shown in the deep-check section.
+- The deep check is a local Chrome lab measurement (LCP/CLS/TTFB/FCP + TBT, mobile viewport);
+  INP needs real user interaction and shows `—`. Google PageSpeed Insights is only used as a
+  fallback when Chrome is unavailable.
 - Single-page analysis; cross-page duplicate titles/descriptions and site-wide crawling are
   roadmap items (Phase 2).
 - Replacing an installed bundle under the same package name requires restarting DSH so the
@@ -93,7 +99,8 @@ request and override the row config for that call.
 | `lib/parse.js` | Dependency-free HTML / robots.txt / sitemap parsing |
 | `lib/checks.js` | The 21 checks + group weights |
 | `lib/score.js` | Weighted scoring |
-| `lib/psi.js` | PageSpeed Insights deep check |
+| `lib/localdeep.js` | Local Chrome (CDP) CWV measurement for the deep check |
+| `lib/psi.js` | PageSpeed Insights deep check (fallback when Chrome is unavailable) |
 | `client.js` | Client half: left-sidebar row + `main` panel UI |
 | `locale/*.json` | Bundle metadata (`meta.title`, `meta.description`, `meta.detail`) |
 | `docs/DETAIL.md` (+ zh) | Plugin detail page |

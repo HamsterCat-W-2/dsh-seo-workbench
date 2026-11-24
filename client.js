@@ -15,7 +15,7 @@ window.__ModuleLoader__.load({
     // ---------------------------------------------------------------- utils
 
     const AUDIT_STAGES = ['抓取页面', '解析 HTML', '抓取 robots / sitemap', '运行检查', '计算得分'];
-    const DEEP_STAGES = ['请求 PageSpeed', '运行 Lighthouse', '读取 CWV 指标'];
+    const DEEP_STAGES = ['启动本地 Chrome', '渲染页面', '采集 CWV 指标'];
     const SEVERITY_LABELS = { critical: '严重', high: '高', medium: '中', low: '低' };
     const LS_SETTINGS = 'seo-wb-settings';
     const LS_HISTORY = 'seo-wb-history';
@@ -67,6 +67,9 @@ window.__ModuleLoader__.load({
       'llm-failed': '模型调用失败',
       'empty-output': '模型没有返回内容，请换个模型再试',
       'psi-failed': 'PageSpeed 请求失败',
+      'chrome-unavailable': '本机没有可用的 Google Chrome，深度检测改用 PageSpeed',
+      'chrome-start-failed': 'Chrome 启动失败（可能被安全策略拦截）',
+      'measure-failed': '本地 Chrome 检测失败',
       'models-failed': '模型列表获取失败',
     };
 
@@ -220,16 +223,21 @@ window.__ModuleLoader__.load({
       if (p.jsonldTypes && p.jsonldTypes.length) L.push(`- JSON-LD：${p.jsonldTypes.join('、')}`);
       L.push('');
       if (deep && deep.status === 'ok') {
-        L.push('## 深度检测（PageSpeed Insights）');
+        L.push(deep.source === 'local-chrome' ? '## 深度检测（本地 Chrome 实测 Lab）' : '## 深度检测（PageSpeed Insights）');
         L.push('');
         L.push(`- 策略：${deep.strategy || 'mobile'}`);
-        L.push(`- Performance ${Math.round((deep.performance || 0) * 100)} / SEO ${Math.round((deep.seo || 0) * 100)} / Accessibility ${Math.round((deep.accessibility || 0) * 100)} / Best Practices ${Math.round((deep.bestPractices || 0) * 100)}`);
-        if (deep.cwv) {
-          L.push(`- LCP ${Math.round(deep.cwv.lcpMs)}ms / CLS ${deep.cwv.cls} / INP ${Math.round(deep.cwv.inpMs)}ms / TTFB ${Math.round(deep.cwv.ttfbMs)}ms / FCP ${Math.round(deep.cwv.fcpMs)}ms`);
+        const catVals = [deep.performance, deep.seo, deep.accessibility, deep.bestPractices];
+        if (catVals.some((v) => typeof v === 'number')) {
+          L.push(`- Performance ${Math.round((deep.performance || 0) * 100)} / SEO ${Math.round((deep.seo || 0) * 100)} / Accessibility ${Math.round((deep.accessibility || 0) * 100)} / Best Practices ${Math.round((deep.bestPractices || 0) * 100)}`);
         }
-        if (deep.schemaFound !== undefined) L.push(`- Schema 检测：${deep.schemaFound ? '发现结构化数据' : '未检测到'}`);
+        if (deep.cwv) {
+          const inp = typeof deep.cwv.inpMs === 'number' ? `${Math.round(deep.cwv.inpMs)}ms` : '—（Lab 无法测量交互延迟）';
+          L.push(`- LCP ${Math.round(deep.cwv.lcpMs)}ms / CLS ${deep.cwv.cls} / INP ${inp} / TTFB ${Math.round(deep.cwv.ttfbMs)}ms / FCP ${Math.round(deep.cwv.fcpMs)}ms`);
+          if (typeof deep.cwv.tbtMs === 'number') L.push(`- TBT ${Math.round(deep.cwv.tbtMs)}ms（Lab 近似）`);
+        }
+        if (deep.schemaFound !== undefined) L.push(`- Schema 检测：${deep.schemaFound ? `发现结构化数据${(deep.jsonldTypes || []).length ? `（${deep.jsonldTypes.join('、')}）` : ''}` : '未检测到'}`);
         if (deep.lighthouseIssues && deep.lighthouseIssues.length) {
-          L.push(`- Lighthouse 失败项：${deep.lighthouseIssues.join('、')}`);
+          L.push(`- Lighthouse 失败项：${deep.lighthouseIssues.map((i) => (i && i.title) || String(i)).join('、')}`);
         }
         L.push('');
       }
@@ -456,6 +464,9 @@ window.__ModuleLoader__.load({
       if (/quota\s+exceeded/i.test(message || '')) {
         return 'PageSpeed 免费匿名配额已用尽。在设置里填入你自己的 API Key，或在 profile cordis.patch.yml 的 seo-workbench 行加 config.psiKey / 环境变量 PSI_API_KEY 后重试。';
       }
+      if (code === 'chrome-unavailable' || code === 'chrome-start-failed') {
+        return message || '本地 Chrome 不可用，深度检测无法进行';
+      }
       if (message) return message;
       return ERROR_CODES[code] || '深度检测失败';
     }
@@ -473,10 +484,17 @@ window.__ModuleLoader__.load({
         );
       }
       const cats = [['Performance', deep.performance], ['SEO', deep.seo], ['Accessibility', deep.accessibility], ['Best Practices', deep.bestPractices]];
+      const hasCats = cats.some(([, v]) => typeof v === 'number');
+      const isLocal = deep.source === 'local-chrome';
       return h(
         'div',
         { className: 'seo-wb-deep' },
-        h('div', { className: 'seo-wb-section-title' }, `深度检测 · ${deep.strategy === 'desktop' ? '桌面端' : '移动端'}`),
+        h(
+          'div',
+          { className: 'seo-wb-section-title' },
+          `深度检测 · ${deep.strategy === 'desktop' ? '桌面端' : '移动端'}`,
+          h('span', { className: 'seo-wb-chip' }, isLocal ? '本地 Chrome 实测（Lab）' : 'PageSpeed Insights'),
+        ),
         deep.cwv
           ? h(
               'div',
@@ -486,28 +504,39 @@ window.__ModuleLoader__.load({
               cwvCard('INP', deep.cwv.inpMs, 200, 500),
               cwvCard('TTFB', deep.cwv.ttfbMs, 800, 1800),
               cwvCard('FCP', deep.cwv.fcpMs, 1800, 3000),
+              typeof deep.cwv.tbtMs === 'number' ? cwvCard('TBT', deep.cwv.tbtMs, 200, 600) : null,
+            )
+          : null,
+        hasCats
+          ? h(
+              'div',
+              { className: 'seo-wb-cat-bars' },
+              cats.map(([label, v]) => {
+                const pct = Math.round((v || 0) * 100);
+                return h(
+                  'div',
+                  { key: label, className: 'seo-wb-cat-row' },
+                  h('span', { className: 'seo-wb-group-label' }, label),
+                  h('span', { className: 'seo-wb-group-track' }, h('span', { className: `seo-wb-group-fill seo-wb-fill-${scoreColor(pct)}`, style: { width: `${pct}%` } })),
+                  h('span', { className: 'seo-wb-group-value' }, String(pct)),
+                );
+              }),
             )
           : null,
         h(
           'div',
-          { className: 'seo-wb-cat-bars' },
-          cats.map(([label, v]) => {
-            const pct = Math.round((v || 0) * 100);
-            return h(
-              'div',
-              { key: label, className: 'seo-wb-cat-row' },
-              h('span', { className: 'seo-wb-group-label' }, label),
-              h('span', { className: 'seo-wb-group-track' }, h('span', { className: `seo-wb-group-fill seo-wb-fill-${scoreColor(pct)}`, style: { width: `${pct}%` } })),
-              h('span', { className: 'seo-wb-group-value' }, String(pct)),
-            );
-          }),
-        ),
-        h(
-          'div',
           { className: 'seo-wb-kv' },
           h('dt', null, 'Schema 检测'),
-          h('dd', null, deep.schemaFound ? '发现结构化数据' : '未检测到（纯 JS 渲染或站点无 schema）'),
+          h('dd', null, deep.schemaFound ? `发现结构化数据${(deep.jsonldTypes || []).length ? `（${deep.jsonldTypes.join('、')}）` : ''}` : '未检测到（纯 JS 渲染或站点无 schema）'),
         ),
+        deep.title
+          ? h(
+              'div',
+              { className: 'seo-wb-kv' },
+              h('dt', null, '渲染后标题'),
+              h('dd', null, deep.title),
+            )
+          : null,
         deep.lighthouseIssues && deep.lighthouseIssues.length
           ? h(
               'div',
@@ -527,7 +556,7 @@ window.__ModuleLoader__.load({
 
     const SETTINGS_FIELDS = [
       ['defaultSite', '默认网址', 'text', '分析框自动预填的网址', 'https://example.com'],
-      ['psiKey', 'PageSpeed API Key', 'text', '可选；深度检测用，填了可避开匿名配额', 'AIza…'],
+      ['psiKey', 'PageSpeed API Key', 'text', '可选；仅当本机没有 Chrome 时深度检测才回退到 PageSpeed', 'AIza…'],
       ['timeoutMs', '抓取超时（毫秒）', 'text', '默认 15000', '15000'],
       ['maxRedirects', '最大重定向数', 'text', '默认 5', '5'],
     ];
@@ -698,7 +727,13 @@ window.__ModuleLoader__.load({
         setError(null);
         try {
           const data = await postJson('/seo-workbench/api/deep', { url, psiKey: settings.psiKey || undefined });
-          if (data.status === 'error') throw new Error(mapDeepError(data.error));
+          if (data.status === 'error') {
+            // Keep the structured error (hint included) so DeepSection can
+            // render the precise guidance instead of a bare string.
+            setDeep({ status: 'error', error: data.error || { message: '深度检测失败' } });
+            setError(mapDeepError(data.error));
+            return;
+          }
           setDeep(data);
         } catch (err) {
           setError(err.message || String(err));

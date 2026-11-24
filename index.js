@@ -17,6 +17,7 @@
  */
 
 import { runAudit, runPageSpeed } from './lib/engine.js';
+import { runLocalDeep } from './lib/localdeep.js';
 
 export const inject = ['webServer', 'llm'];
 
@@ -190,15 +191,34 @@ export function apply(ctx, config = {}) {
     'seo-workbench: audit route',
   );
 
-  // POST /api/deep — body may carry a user-provided PageSpeed API key.
-  // Errors keep Google's message verbatim and attach an actionable hint.
+  // POST /api/deep — measure real Core Web Vitals:
+  //   1. local headless Chrome (default; no Google dependency, no API key);
+  //   2. Google PageSpeed Insights as a fallback when Chrome is unavailable
+  //      (body may carry a user-provided PSI API key; errors keep Google's
+  //      message verbatim and attach an actionable hint).
   ctx.effect(
     () =>
       ctx.webServer.register({
         kind: 'exact',
         path: `${API}deep`,
         handler: createUrlHandler(async (url, body) => {
+          const local = await runLocalDeep(url, {
+            timeoutMs: clampInt(body && body.deepTimeoutMs, 15000, 90000, 45000),
+            chromePath: config.chromePath || process.env.SEO_WB_CHROME_PATH,
+          });
+          if (local.status === 'ok') return local;
+          // Chrome unavailable → PSI fallback (needs a key; anonymous quota is
+          // often exhausted, so without a key we report the local error).
           const key = (body && typeof body.psiKey === 'string' && body.psiKey.trim()) || basePsiKey;
+          if (!key) {
+            return {
+              status: 'error',
+              error: {
+                code: 'chrome-unavailable',
+                message: `${local.error.message} 且未配置 PageSpeed API Key（设置 → PageSpeed API Key），无法做深度检测。`,
+              },
+            };
+          }
           const result = await runPageSpeed(url, { key });
           if (result && result.status === 'error' && result.error) {
             return {
