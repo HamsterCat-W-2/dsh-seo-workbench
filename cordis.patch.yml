@@ -1,0 +1,3 @@
+- insert:
+    - id: seo-workbench
+      name: '@local/seo-workbench'
