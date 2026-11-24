@@ -1097,7 +1097,7 @@ window.__ModuleLoader__.load({
     // ----------------------------------------------------------------- CSS
 
     const CSS = `
-.seo-wb-root { padding: 20px 24px 40px; max-width: 900px; width: 100%; margin: 0 auto; box-sizing: border-box; color: var(--dsw-alias-label-primary); font-family: inherit; }
+.seo-wb-root { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: calc(20px + var(--dsh-frame-top-clearance, 0px)) 24px 48px; max-width: 900px; width: 100%; margin: 0 auto; box-sizing: border-box; color: var(--dsw-alias-label-primary); font-family: inherit; }
 .seo-wb-root * { box-sizing: border-box; }
 .seo-wb-topbar { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
 .seo-wb-brand { min-width: 0; }
