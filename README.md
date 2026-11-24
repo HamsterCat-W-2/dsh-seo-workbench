@@ -15,8 +15,30 @@ A DeepSeek Harness plugin that runs technical SEO audits of websites in the righ
    (severity + impact → evidence → fix), the per-check detail, and a page overview.
 4. **导出 .md** downloads a full Markdown report; **复制** copies it to the clipboard.
 5. **深度检测（CWV）** runs a Google PageSpeed Insights check (real Core Web Vitals,
-   Lighthouse category scores, and a fallback JSON-LD detection). It needs a public
-   `PSI_API_KEY` — configure it in the plugin config when available.
+   Lighthouse category scores, and a fallback JSON-LD detection). It works without a key at
+   reduced quota; set `PSI_API_KEY` in the environment (or a plugin row `config.psiKey`)
+   for the official quota.
+
+## Configuration
+
+This bundle intentionally does **not** export a `Config` schema: linked bundles cannot
+resolve external `@deepseek-ai/*` packages (their real path never reaches the profile's
+`node_modules`), and such an import aborts activation. Tunables are still read from the
+row `config` object — add a `config:` block to the patch row in the profile's
+`cordis.patch.yml`:
+
+```yaml
+- insert:
+    - id: seo-workbench
+      name: '@local/seo-workbench'
+      config:
+        fetchTimeoutMs: 15000   # per-request timeout
+        maxRedirects: 5         # redirect hops followed per page
+        userAgent: ''           # empty = built-in Chrome-like UA
+        psiKey: ''              # PageSpeed Insights key (or env PSI_API_KEY)
+```
+
+`PSI_API_KEY` from the environment is used when `config.psiKey` is empty.
 
 ## Check inventory
 
