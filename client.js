@@ -230,6 +230,9 @@ window.__ModuleLoader__.load({
         L.push(`- 抓取页面：${st.pages ?? (report.pages || []).length} 页（成功 ${st.ok ?? '-'} / 失败 ${st.failed ?? '-'} / 被 robots 跳过 ${st.skippedDisallowed ?? '-'}）`);
         L.push(`- sitemap：${(report.sitemap && report.sitemap.urls && report.sitemap.urls.length) || 0} 个 URL　|　死链：${st.deadLinksFound ?? 0} 个　|　深度上限：${st.maxDepth ?? '-'}`);
         L.push(`- robots.txt：${report.robots && report.robots.status ? report.robots.status : '?'}${report.robots && report.robots.disallowAll ? '（整站禁止抓取）' : ''}`);
+        if (Array.isArray(report.languages) && report.languages.length > 1) {
+          L.push(`- 语言分布：${report.languages.map((l) => `${l.lang === 'unknown' ? '未标注' : l.lang} ×${l.pages}`).join(' · ')}`);
+        }
         L.push('');
         L.push('| 页面 | 状态 | 深度 | 字数 | 入链 | 标记 |');
         L.push('| --- | --- | --- | --- | --- | --- |');
@@ -646,6 +649,9 @@ window.__ModuleLoader__.load({
             : null,
           report.filters && report.filters.pathQuotas
             ? h('div', { className: 'seo-wb-kv' }, h('dt', null, '路径配额'), h('dd', { className: 'seo-wb-mono' }, String(report.filters.pathQuotas).split(/\n+/).map((l) => l.trim()).filter(Boolean).join('；')))
+            : null,
+          Array.isArray(report.languages) && report.languages.length > 1
+            ? h('div', { className: 'seo-wb-kv' }, h('dt', null, '语言分布'), h('dd', { className: 'seo-wb-mono' }, report.languages.map((l) => `${l.lang === 'unknown' ? '未标注' : l.lang} ×${l.pages}`).join(' · ')))
             : null,
           h('div', { className: 'seo-wb-kv' }, h('dt', null, '抓取深度'), h('dd', { className: 'seo-wb-mono' }, `上限 ${st.maxDepth ?? '-'} 层`)),
           h('div', { className: 'seo-wb-kv' }, h('dt', null, '耗时'), h('dd', { className: 'seo-wb-mono' }, `${Math.round(report.durationMs || 0)}ms`)),

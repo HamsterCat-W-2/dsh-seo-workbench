@@ -74,6 +74,32 @@ const SITE_DUP = `<!doctype html>
 <body><h1>重复页标题</h1><p>${'文'.repeat(120)}</p><a href="/site/">首页</a></body>
 </html>`;
 
+const SITE_LANG_EN = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Multilingual page (identical title across languages — declared alternates)</title>
+  <meta name="description" content="Identical description across language versions — declared alternates via hreflang">
+  <link rel="alternate" hreflang="en" href="/lang-en">
+  <link rel="alternate" hreflang="zh-CN" href="/lang-zh">
+  <link rel="alternate" hreflang="x-default" href="/lang-en">
+</head>
+<body><h1>Multilingual page</h1><p>${'word '.repeat(200)}</p><a href="/site/">Home</a></body>
+</html>`;
+
+const SITE_LANG_ZH = `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>Multilingual page (identical title across languages — declared alternates)</title>
+  <meta name="description" content="Identical description across language versions — declared alternates via hreflang">
+  <link rel="alternate" hreflang="en" href="/lang-en">
+  <link rel="alternate" hreflang="zh-CN" href="/lang-zh">
+  <link rel="alternate" hreflang="x-default" href="/lang-en">
+</head>
+<body><h1>Multilingual page</h1><p>${'文'.repeat(240)}</p><a href="/site/">首页</a></body>
+</html>`;
+
 const SITE_THIN = `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -107,6 +133,8 @@ const SITE_HOME = `<!doctype html>
 <body>
   <h1>站点首页</h1>
   <p>${'文'.repeat(180)}</p>
+  <a href="/lang-en">English version</a>
+  <a href="/lang-zh">中文版本</a>
   <a href="/dup-a">重复页 A</a>
   <a href="/dup-b">重复页 B</a>
   <a href="/thin">薄内容页</a>
@@ -154,6 +182,11 @@ const server = http.createServer((req, res) => {
   if (url === '/site/' || url === '/site') {
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     res.end(SITE_HOME);
+    return;
+  }
+  if (url === '/lang-en' || url === '/lang-zh') {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end(url === '/lang-en' ? SITE_LANG_EN : SITE_LANG_ZH);
     return;
   }
   if (url === '/dup-a' || url === '/dup-b') {
@@ -303,6 +336,14 @@ try {
   const dupRows = site.pages.filter((p) => p.dupTitle);
   assert(dupRows.length >= 2, `应标记 >= 2 个重复标题页，实际 ${dupRows.length}`);
   assert(dupRows.some((p) => p.url.includes('/dup-a')) && dupRows.some((p) => p.url.includes('/dup-b')), `重复标题页应包含 /dup-a 与 /dup-b，实际 ${dupRows.map((p) => p.url).join(',')}`);
+  // Multilingual handling: hreflang-declared alternates with identical text are NOT duplicates;
+  // the report carries a language distribution and a note.
+  assert(Array.isArray(site.languages) && site.languages.length >= 1, `site 报告应有语言分布，实际 ${JSON.stringify(site.languages)}`);
+  assert(site.languages.some((l) => l.lang === 'en') && site.languages.some((l) => l.lang === 'zh-cn'), `语言分布应含 en 与 zh-cn，实际 ${JSON.stringify(site.languages)}`);
+  const langRows = site.pages.filter((p) => p.url.includes('/lang-en') || p.url.includes('/lang-zh'));
+  assert(langRows.length === 2, `应抓到 2 个多语言页，实际 ${langRows.length}`);
+  assert(langRows.every((p) => !p.dupTitle && !p.dupDesc), 'hreflang 互链的多语言页不应报重复标题/描述');
+  assert(site.notes.some((n) => n.includes('多种语言版本')), `应有多种语言版本提示，实际 ${JSON.stringify(site.notes)}`);
   const thinRow = site.pages.find((p) => p.thin && p.url.includes('/thin'));
   assert(thinRow, '应标记薄内容页 /thin');
   const deadRow = site.pages.find((p) => p.failed && p.url.includes('/dead-404'));
