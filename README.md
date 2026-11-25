@@ -150,6 +150,10 @@ measured by a lab run; the card shows `—` locally. Chrome is launched with `--
   links; its concurrency adapts to server responsiveness. Heuristic cross-page thresholds
   (e.g. thin content < 300 words) are not calibrated per site type; dead-link sampling and
   orphan detection are best-effort over the crawled subset.
+- 多语言站点: every URL is a separate page (correct); pages that declare each other as
+  hreflang alternates are excluded from duplicate-title/description detection (they are
+  equivalents, not duplicates), keyword density is computed per language (zh/en), and the
+  site overview + Markdown export show the language distribution.
 - GSC data requires the site to be verified in Google Search Console, and Bing Webmaster
   data requires the site registered there. CrUX needs enough real traffic for samples.
 - Replacing an installed bundle under the same package name requires restarting DSH so the
