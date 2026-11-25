@@ -196,6 +196,10 @@ window.__ModuleLoader__.load({
           if (i.impact) L.push(`- **影响**：${i.impact}`);
           if (i.evidence) L.push(`- **证据**：${i.evidence}`);
           if (i.fix) L.push(`- **修复**：${i.fix}`);
+          if (i.pages && i.pages.length) {
+            L.push(`- **涉及页面（${i.pages.length}）**：`);
+            for (const pg of i.pages) L.push(`  - \`${pg.url}\` — ${pg.detail || ''}`);
+          }
           L.push('');
         }
       }
@@ -399,6 +403,21 @@ window.__ModuleLoader__.load({
                   issue.impact ? h('div', { className: 'seo-wb-kv' }, h('dt', null, '影响'), h('dd', null, issue.impact)) : null,
                   issue.evidence ? h('div', { className: 'seo-wb-kv' }, h('dt', null, '证据'), h('dd', { className: 'seo-wb-mono' }, issue.evidence)) : null,
                   issue.fix ? h('div', { className: 'seo-wb-kv' }, h('dt', null, '修复'), h('dd', null, issue.fix)) : null,
+                  issue.pages && issue.pages.length
+                    ? h(
+                        'div',
+                        { className: 'seo-wb-issue-pages' },
+                        h('div', { className: 'seo-wb-issue-pages-title' }, `涉及页面（${issue.pages.length}）`),
+                        issue.pages.map((p, i) =>
+                          h(
+                            'div',
+                            { key: `${issue.id}-${i}`, className: 'seo-wb-issue-page' },
+                            h('div', { className: 'seo-wb-issue-page-url', title: p.url }, p.url),
+                            p.detail ? h('div', { className: 'seo-wb-issue-page-detail' }, p.detail) : null,
+                          ),
+                        ),
+                      )
+                    : null,
                 )
               : null,
           );
@@ -485,7 +504,7 @@ window.__ModuleLoader__.load({
       const robots = report.robots || {};
       const sitemap = report.sitemap || {};
       const statCards = [
-        ['抓取页面', String(st.pages ?? pages.length)],
+        ['抓取页面', `${st.pages ?? pages.length}/${st.maxPages ?? '-'}`],
         ['成功', String(st.ok ?? '-')],
         ['失败', String(st.failed ?? '-')],
         ['robots 跳过', String(st.skippedDisallowed ?? '-')],
@@ -495,14 +514,16 @@ window.__ModuleLoader__.load({
       const flagOf = (row) => {
         const out = [];
         if (row.noindex) out.push('noindex');
-        if (row.thin) out.push('薄');
+        if (row.thin) out.push(`薄(${row.words ?? 0}字)`);
         if (row.dupTitle) out.push('重复标题');
         if (row.dupDesc) out.push('重复描述');
-        if (row.orphan) out.push('孤儿');
+        if (row.orphan) out.push('孤儿(0入链)');
         if (row.missingH1) out.push('缺H1');
         if (row.missingCanonical) out.push('缺canonical');
         if (row.missingTitle) out.push('缺标题');
         if (row.missingDesc) out.push('缺描述');
+        if (row.imagesNoAlt > 0) out.push(`缺alt(${row.imagesNoAlt}/${row.imageCount ?? 0})`);
+        if (row.redirectCount > 0) out.push(`重定向(${row.redirectCount})`);
         return out;
       };
       return h(
@@ -518,6 +539,7 @@ window.__ModuleLoader__.load({
           { className: 'seo-wb-overview' },
           h('div', { className: 'seo-wb-kv' }, h('dt', null, 'robots.txt'), h('dd', { className: 'seo-wb-mono' }, robots.status ? `HTTP ${robots.status}${robots.disallowAll ? '（整站禁止抓取）' : ''}` : '未读取')),
           h('div', { className: 'seo-wb-kv' }, h('dt', null, 'sitemap'), h('dd', { className: 'seo-wb-mono' }, sitemap.urls && sitemap.urls.length ? `${sitemap.urls.length} 个 URL（${(sitemap.fetchedFrom || []).join('、')}）` : '未发现')),
+          h('div', { className: 'seo-wb-kv' }, h('dt', null, '抓取上限'), h('dd', { className: 'seo-wb-mono' }, `${st.maxPages ?? '-'} 页（⚙ 设置里可调到 200）`)),
           h('div', { className: 'seo-wb-kv' }, h('dt', null, '抓取深度'), h('dd', { className: 'seo-wb-mono' }, `上限 ${st.maxDepth ?? '-'} 层`)),
           h('div', { className: 'seo-wb-kv' }, h('dt', null, '耗时'), h('dd', { className: 'seo-wb-mono' }, `${Math.round(report.durationMs || 0)}ms`)),
         ),
@@ -1370,6 +1392,11 @@ window.__ModuleLoader__.load({
 .seo-wb-field-hint { font-size: 11px; color: var(--dsw-alias-label-secondary); }
 .seo-wb-settings-actions { display: flex; gap: 8px; margin-top: 6px; }
 .seo-wb-settings-actions .seo-wb-btn-primary { margin-right: auto; }
+.seo-wb-issue-pages { margin-top: 10px; border-top: 1px dashed var(--dsw-alias-border-l1); padding-top: 8px; }
+.seo-wb-issue-pages-title { font-size: 12px; font-weight: 600; color: var(--dsw-alias-label-primary); margin-bottom: 6px; }
+.seo-wb-issue-page { display: flex; flex-wrap: wrap; gap: 4px 10px; padding: 3px 0; font-size: 12px; line-height: 1.5; }
+.seo-wb-issue-page-url { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--dsw-alias-label-primary); word-break: break-all; }
+.seo-wb-issue-page-detail { color: var(--dsw-alias-label-secondary); flex: 1 1 auto; min-width: 120px; word-break: break-word; }
 .seo-wb-mode { display: inline-flex; gap: 2px; margin-bottom: 10px; background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1); border-radius: 9px; padding: 2px; }
 .seo-wb-mode-btn { border: 0; background: none; font-family: inherit; font-size: 13px; color: var(--dsw-alias-label-secondary); padding: 5px 14px; border-radius: 7px; cursor: pointer; }
 .seo-wb-mode-btn:hover { color: var(--dsw-alias-label-primary); }
