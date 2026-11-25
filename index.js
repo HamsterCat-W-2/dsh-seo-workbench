@@ -455,9 +455,9 @@ export function apply(ctx, config = {}) {
                   return;
                 }
                 const clientSecret = (body && body.clientSecret) || cfg.clientSecret;
-                gscClientCreds = { clientId, clientSecret };
                 const origin = ctx.webServer.getOrigin ? ctx.webServer.getOrigin() : '';
                 const redirectUri = origin ? `${origin}${API}gsc-callback` : 'urn:ietf:wg:oauth:2.0:oob';
+                gscClientCreds = { clientId, clientSecret, redirectUri };
                 const result = buildAuthUrl({ clientId, redirectUri });
                 sendJson(res, 200, result);
               } catch (err) {
@@ -492,7 +492,11 @@ export function apply(ctx, config = {}) {
               sendHtml(res, 200, '缺少 Client ID / Secret', '请先在 DSH 的 ⚙ 设置 → 搜索数据 里填好 OAuth Client ID 和 Secret，再重新点「获取授权链接」。');
               return;
             }
-            const result = await exchangeCode({ clientId: creds.clientId, clientSecret: creds.clientSecret, code });
+            // The token exchange MUST repeat the exact redirect_uri that was used
+            // for the consent request, otherwise Google answers redirect_uri_mismatch.
+            const origin = ctx.webServer.getOrigin ? ctx.webServer.getOrigin() : '';
+            const redirectUri = creds.redirectUri || (origin ? `${origin}${API}gsc-callback` : 'urn:ietf:wg:oauth:2.0:oob');
+            const result = await exchangeCode({ clientId: creds.clientId, clientSecret: creds.clientSecret, code, redirectUri });
             if (!result || result.status !== 'ok') {
               sendHtml(res, 200, '授权码兑换失败', (result && result.error && result.error.message) || '未知错误');
               return;
