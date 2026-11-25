@@ -1355,6 +1355,16 @@ window.__ModuleLoader__.load({
         // eslint-disable-next-line react-hooks/exhaustive-deps
       }, []);
 
+      // Panel open ⇔ seo_* agent tools visible to the chat agent; panel closed
+      // ⇔ tools vanish (host `when` gate). Fire-and-forget POSTs.
+      useEffect(() => {
+        postJson('/seo-workbench/api/tools/scope', { enabled: true }).catch(() => {});
+        return () => {
+          postJson('/seo-workbench/api/tools/scope', { enabled: false }).catch(() => {});
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, []);
+
       useEffect(() => {
         fetch('/seo-workbench/api/models', { credentials: 'same-origin', cache: 'no-store' })
           .then((r) => r.json())

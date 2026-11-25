@@ -80,6 +80,16 @@ A DeepSeek Harness plugin that runs technical SEO audits of websites from a dedi
    pointing at different URLs, canonical-in-set agreement, and target reachability
    (200 + indexable). Issues are reported in 可抓取与索引 with 涉及页面 details; the
    single-page audit checks codes / x-default / self-reference too.
+14. **Agent 工具（在对话里让 agent 直接分析）** — while the workbench panel is open, the
+   plugin registers its analysis capabilities as DSH agent tools
+   (`seo_audit_page` / `seo_audit_site` / `seo_keywords` / `seo_deep` / `seo_crux` /
+   `seo_bing` / `seo_gsc_search`), so you can simply ask the chat agent
+   “帮我分析 https://example.com 的 SEO” and it calls the tool and answers with a
+   bounded summary. The tools are **`when`-gated**: they are only described to /
+   callable by agents while this workbench panel is open (the client toggles a host-side
+   scope on panel mount/unmount via `POST /seo-workbench/api/tools/scope`), so other
+   conversations never see them. Tool data sources fall back to settings/env (PSI key,
+   CrUX key, Bing key, GSC OAuth tokens cached in the workbench).
 
 ## Configuration
 
@@ -136,6 +146,7 @@ measured by a lab run; the card shows `—` locally. Chrome is launched with `--
 9. 站点体检 crawl mode (BFS crawler + cross-page aggregation + site UI) — done
 10. Crawl politeness (adaptive concurrency + `Crawl-delay` + default cap 100) — done
 11. Real search data: CrUX field CWV card + GSC OAuth data + Bing Webmaster data — done (Host restart needed for the new `/crux` `/bing` `/gsc/*` routes)
+12. Agent tools: `seo_*` tools registered into the Host `tools` service, `when`-gated on the workbench panel being open — done (Host restart needed for the new `/tools/scope` route + tool registration)
 
 ## Notes & limitations
 
@@ -163,7 +174,7 @@ measured by a lab run; the card shows `—` locally. Chrome is launched with `--
 
 | File | Purpose |
 |---|---|
-| `index.js` | Host half: webServer routes (`/seo-workbench/api/audit`, `/deep`, `/models`, `/advice`, `/site-audit`, `/crux`, `/bing`, `/gsc/auth-url`, `/gsc/token`, `/gsc/sites`, `/gsc/search`, `/gsc/sitemaps`, `/gsc/inspect`) |
+| `index.js` | Host half: webServer routes (`/seo-workbench/api/audit`, `/deep`, `/models`, `/advice`, `/site-audit`, `/crux`, `/bing`, `/gsc/auth-url`, `/gsc/token`, `/gsc/sites`, `/gsc/search`, `/gsc/sitemaps`, `/gsc/inspect`, `/tools/scope`) + panel-gated agent tools (`seo_audit_page`, `seo_audit_site`, `seo_keywords`, `seo_deep`, `seo_crux`, `seo_bing`, `seo_gsc_search`) |
 | `lib/engine.js` | `runAudit()` orchestration |
 | `lib/fetch.js` | HTTP fetch w/ redirect chain, timeout, size cap |
 | `lib/parse.js` | Dependency-free HTML / robots.txt / sitemap parsing |

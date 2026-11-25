@@ -25,7 +25,7 @@ import { runCrux } from './lib/crux.js';
 import { runBingSearch } from './lib/bing.js';
 import { buildAuthUrl, exchangeCode, listSites, searchAnalytics, listSitemaps, inspectUrls } from './lib/gsc.js';
 
-export const inject = ['webServer', 'llm'];
+export const inject = ['webServer', 'llm', 'tools'];
 
 /*
  * NOTE: no `Config` schema export on purpose — linked bundles must not import
@@ -224,6 +224,292 @@ function buildAdvicePrompt(url, report, extras = {}) {
   ].join('\n');
 }
 
+/* ------------------------------------------------------------------------ *
+ * Agent tools — registered into the Host `tools` service so any DSH chat
+ * agent can call the workbench directly ("帮我分析 https://x.com 的 SEO").
+ * Results are bounded Chinese markdown summaries: the deep link (full report,
+ * history, exports) stays in the sidebar workbench.
+ * ------------------------------------------------------------------------ */
+
+const TOOL_OUTPUT = { schema: { type: 'string' }, render: (_args, value) => String(value ?? '') };
+
+function failText(result) {
+  const e = (result && result.error) || {};
+  return `❌ 分析失败：${e.message || e.code || '未知错误'}`;
+}
+
+function groupLine(report) {
+  return (report && Array.isArray(report.groups) ? report.groups : [])
+    .map((g) => `${g.label || g.id} ${g.score ?? '?'}/100`)
+    .join(' · ');
+}
+
+function issuesLine(report, limit = 5) {
+  const issues = (report && Array.isArray(report.issues) ? report.issues : []).slice(0, limit);
+  if (!issues.length) return '（未发现问题）';
+  return issues
+    .map((i, n) => `${n + 1}. [${i.severity || 'medium'}] ${i.title || i.id}${i.pages && i.pages.length ? `（涉及 ${i.pages.length} 页）` : ''}`)
+    .join('\n');
+}
+
+function summarizePage(report) {
+  if (!report || report.status === 'error') return failText(report);
+  const page = report.page || {};
+  return [
+    `## 单页 SEO 体检：${report.url}`,
+    `- 总分 **${report.score ? report.score.total : '?'}/100** · ${groupLine(report)}`,
+    `- HTTP ${page.httpStatus ?? '?'} · 重定向 ${(page.redirectChain || []).length} 跳 · 体积 ${page.bytes ? `${Math.round(page.bytes / 1024)} KB` : '?'}`,
+    `- 问题 ${(report.issues || []).length} 条：`,
+    issuesLine(report),
+    '',
+    '（完整报告、评分明细与导出在侧边栏「SEO 分析」工作台里）',
+  ].join('\n');
+}
+
+function summarizeSite(report) {
+  if (!report || report.status === 'error') return failText(report);
+  const stats = report.stats || {};
+  return [
+    `## 站点 SEO 体检：${report.url}`,
+    `- 抓取 ${stats.pages ?? 0} 页（成功 ${stats.ok ?? 0} / 失败 ${stats.failed ?? 0} / robots 跳过 ${stats.skippedDisallowed ?? 0} / 死链 ${stats.deadLinksFound ?? 0}）`,
+    `- 总分 **${report.score ? report.score.total : '?'}/100** · ${groupLine(report)}`,
+    `- 问题 ${(report.issues || []).length} 条：`,
+    issuesLine(report),
+    '',
+    '（完整页面表、问题详情与导出在侧边栏「SEO 分析」工作台里）',
+  ].join('\n');
+}
+
+function summarizeKeywords(report) {
+  if (!report || report.status === 'error') return failText(report);
+  const kw = (report.keywords || []).slice(0, 10);
+  const lines = [
+    `## 站点关键词分析：${report.url}`,
+    `- 抓取 ${(report.stats && report.stats.pages) ?? 0} 页，提取 ${(report.keywords || []).length} 个关键词（源：站内词频；可选合并 GSC/Bing 真实数据）`,
+    kw.length
+      ? kw.map((k) => `- 「${k.keyword}」频次 ${k.count} · 密度 ${k.density}% · 覆盖 ${k.pages} 页${k.search ? ` · 点击 ${k.search.clicks} 展示 ${k.search.impressions} 排名 ${k.search.position}` : ''}`).join('\n')
+      : '（未提取到足够的关键词）',
+  ];
+  if ((report.clusters || []).length) lines.push(`- 自相残杀 ${report.clusters.length} 组：${report.clusters.slice(0, 5).map((c) => `「${c.keyword}」`).join('、')}`);
+  if ((report.unmatchedQueries || []).length) lines.push(`- 内容缺口 ${report.unmatchedQueries.length} 条：${report.unmatchedQueries.slice(0, 5).map((q) => `「${q.query}」`).join('、')}`);
+  return lines.join('\n');
+}
+
+function summarizeDeep(deep) {
+  if (!deep || deep.status === 'error') return failText(deep);
+  const cwv = deep.cwv || {};
+  const parts = [];
+  if (cwv.lcpMs != null) parts.push(`LCP ${cwv.lcpMs}ms`);
+  if (cwv.fcpMs != null) parts.push(`FCP ${cwv.fcpMs}ms`);
+  if (cwv.ttfbMs != null) parts.push(`TTFB ${cwv.ttfbMs}ms`);
+  if (cwv.cls != null) parts.push(`CLS ${cwv.cls}`);
+  if (cwv.tbtMs != null) parts.push(`TBT ${cwv.tbtMs}ms`);
+  return [
+    `## 深度性能检测：${deep.url}`,
+    `- 来源：${deep.source === 'local-chrome' ? '本机 Chrome 实测（Lab）' : 'PageSpeed Insights'} · 策略 ${deep.strategy || 'mobile'}`,
+    `- ${parts.length ? parts.join(' · ') : '（无有效指标）'}`,
+    '- 说明：Lab 数据单次采样，不代表真实用户；交互延迟 INP 无法在 Lab 测量。',
+  ].join('\n');
+}
+
+function summarizeCrux(result) {
+  if (!result || result.status === 'error') return failText(result);
+  if (!result.data || !result.data.hasData) return `## 字段数据（CrUX）：${result.origin}\n- 样本不足（站点流量太低，Google 没有足够的真实用户数据）。`;
+  const cwv = result.data.cwv || {};
+  const parts = [];
+  if (cwv.lcpMs != null) parts.push(`LCP ${cwv.lcpMs}ms`);
+  if (cwv.cls != null) parts.push(`CLS ${cwv.cls}`);
+  if (cwv.inpMs != null) parts.push(`INP ${cwv.inpMs}ms`);
+  if (cwv.fcpMs != null) parts.push(`FCP ${cwv.fcpMs}ms`);
+  if (cwv.ttfbMs != null) parts.push(`TTFB ${cwv.ttfbMs}ms`);
+  const period = result.data.collectionPeriod || {};
+  return [
+    `## 字段数据（CrUX 真实用户 p75）：${result.origin}`,
+    `- ${parts.join(' · ')}`,
+    `- 统计区间：${period.first || '?'} ~ ${period.last || '?'}`,
+  ].join('\n');
+}
+
+function summarizeSearch(result) {
+  if (!result || result.status === 'error') return failText(result);
+  const src = result.source === 'bing' ? '必应 Webmaster' : 'Google Search Console';
+  const t = result.totals || {};
+  const lines = [
+    `## 搜索数据（${src}）：${result.siteUrl || ''}`,
+    `- 点击 ${t.clicks ?? '?'} · 展示 ${t.impressions ?? '?'} · 平均 CTR ${t.avgCtr ?? '?'}% · 平均排名 ${t.avgPosition ?? '?'}（近 28 天）`,
+  ];
+  (result.queries || []).slice(0, 5).forEach((q) => lines.push(`- 「${q.query}」点击 ${q.clicks} · 展示 ${q.impressions} · 排名 ${q.position}`));
+  return lines.join('\n');
+}
+
+function seoToolDefinitions(config, baseAuditOptions, basePsiKey) {
+  const cfg = config || {};
+  const gscCfg = () => ({
+    clientId: cfg.gscClientId || process.env.GSC_CLIENT_ID || '',
+    clientSecret: cfg.gscClientSecret || process.env.GSC_CLIENT_SECRET || '',
+  });
+  const str = (desc) => ({ type: 'string', description: desc });
+  const num = (desc) => ({ type: 'number', description: desc });
+
+  return [
+    {
+      name: 'seo_audit_page',
+      description: '对单个网页做技术 SEO 体检：可抓取性（robots/sitemap/canonical）、技术基础（HTTPS/混合内容/性能）、On-Page（标题/描述/H1/图片）、内容质量，返回 0–100 总分、分组得分和问题清单。',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: str('要分析的网页地址（https:// 开头）'),
+          fetchTimeoutMs: num('抓取超时毫秒（1000–60000，默认 15000）'),
+        },
+        required: ['url'],
+      },
+      output: TOOL_OUTPUT,
+      execute: async (args) => {
+        const url = String((args && args.url) || '').trim();
+        const report = await runAudit(url, {
+          ...baseAuditOptions,
+          timeoutMs: clampInt(args && args.fetchTimeoutMs, 1000, 60000, baseAuditOptions.timeoutMs),
+        });
+        return summarizePage(report);
+      },
+    },
+    {
+      name: 'seo_audit_site',
+      description: '对一个站点做整站 SEO 体检：从首页+sitemap 出发抓取站内页面（遵守 robots.txt、限深限量），跨页聚合重复标题/描述、薄内容、孤儿页、死链、孤儿、canonical、noindex、hreflang 校验，返回总分、分组得分与按严重度排序的问题清单。耗时较长。',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: str('站点地址（最好从首页开始）'),
+          maxPages: num('最多抓取页数（2–200，默认 30）'),
+          maxDepth: num('最大抓取深度（1–10，默认 3）'),
+        },
+        required: ['url'],
+      },
+      output: TOOL_OUTPUT,
+      execute: async (args) => {
+        const crawl = await crawlSite(String((args && args.url) || '').trim(), {
+          maxPages: clampInt(args && args.maxPages, 2, 200, 30),
+          maxDepth: clampInt(args && args.maxDepth, 1, 10, 3),
+          fetchTimeoutMs: baseAuditOptions.timeoutMs,
+          maxRedirects: baseAuditOptions.maxRedirects,
+          userAgent: baseAuditOptions.userAgent,
+          includePattern: cfg.includePattern || '',
+          excludePattern: cfg.excludePattern || '',
+          pathQuotas: cfg.pathQuotas || '',
+        });
+        if (crawl.status === 'error') return summarizeSite(crawl);
+        return summarizeSite(buildSiteReport(crawl));
+      },
+    },
+    {
+      name: 'seo_keywords',
+      description: '分析站点自身内容的关键词：站内词频/密度/页面覆盖、标题/H1/描述命中、自相残杀（多个页面抢同一关键词）与内容缺口。搜索量/热度是外部付费数据（Google Ads / Ahrefs 等），这里不提供。',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: str('站点地址'),
+          maxPages: num('最多抓取页数（2–200，默认 50）'),
+        },
+        required: ['url'],
+      },
+      output: TOOL_OUTPUT,
+      execute: async (args) => {
+        const report = await analyzeKeywords(String((args && args.url) || '').trim(), {
+          maxPages: clampInt(args && args.maxPages, 2, 200, 50),
+          fetchTimeoutMs: baseAuditOptions.timeoutMs,
+          maxRedirects: baseAuditOptions.maxRedirects,
+          userAgent: baseAuditOptions.userAgent,
+          includePattern: cfg.includePattern || '',
+          excludePattern: cfg.excludePattern || '',
+          pathQuotas: cfg.pathQuotas || '',
+        });
+        return summarizeKeywords(report);
+      },
+    },
+    {
+      name: 'seo_deep',
+      description: '实测网页的 Core Web Vitals：用本机安装的 Google Chrome 无头渲染页面（LCP/FCP/TTFB/CLS/TBT），不需要任何 API Key；本机没有 Chrome 时回退 PageSpeed Insights（需要配置 key）。',
+      parameters: {
+        type: 'object',
+        properties: { url: str('网页地址') },
+        required: ['url'],
+      },
+      output: TOOL_OUTPUT,
+      execute: async (args) => {
+        const url = String((args && args.url) || '').trim();
+        const local = await runLocalDeep(url, { chromePath: cfg.chromePath || process.env.SEO_WB_CHROME_PATH });
+        if (local.status === 'ok') return summarizeDeep(local);
+        if (!basePsiKey) return summarizeDeep(local);
+        const psi = await runPageSpeed(url, { key: basePsiKey });
+        if (psi && psi.status === 'ok') {
+          return summarizeDeep({
+            ...psi,
+            url,
+            strategy: 'mobile',
+            source: 'psi',
+            cwv: psi.cwv || {},
+          });
+        }
+        return `${summarizeDeep(local)}\n\nPSI 回退也失败：${(psi && psi.error && psi.error.message) || '未知'}`;
+      },
+    },
+    {
+      name: 'seo_crux',
+      description: '读取 Google Chrome UX Report（CrUX）的字段 Core Web Vitals（真实用户 28 天 p75），与本地 Chrome 实测互补。需要 CrUX API Key（设置或环境变量 CRUX_API_KEY）；低流量站点会返回样本不足。',
+      parameters: {
+        type: 'object',
+        properties: { url: str('网页地址') },
+        required: ['url'],
+      },
+      output: TOOL_OUTPUT,
+      execute: async (args) => summarizeCrux(await runCrux(String((args && args.url) || '').trim(), { key: cfg.cruxKey || process.env.CRUX_API_KEY || '' })),
+    },
+    {
+      name: 'seo_bing',
+      description: '读取必应 Webmaster 的搜索数据：点击、展示、平均排名、Top 查询词与页面。需要必应 Webmaster API Key（设置或环境变量 BING_API_KEY）。',
+      parameters: {
+        type: 'object',
+        properties: { url: str('站点地址') },
+        required: ['url'],
+      },
+      output: TOOL_OUTPUT,
+      execute: async (args) => summarizeSearch(await runBingSearch(String((args && args.url) || '').trim(), { apiKey: cfg.bingApiKey || process.env.BING_API_KEY || '' })),
+    },
+    {
+      name: 'seo_gsc_search',
+      description: '读取 Google Search Console 的搜索数据（点击/展示/CTR/平均排名与 Top 查询词），复用工作台的 GSC OAuth 授权；需要 OAuth Client ID/Secret 与已授权令牌。',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: str('站点地址（GSC 已验证的站点）'),
+          days: num('统计天数（7–90，默认 28）'),
+          clientId: str('OAuth Client ID（可选，默认读设置/环境变量）'),
+          clientSecret: str('OAuth Client Secret（可选）'),
+          accessToken: str('访问令牌（可选，默认读设置）'),
+          refreshToken: str('刷新令牌（可选）'),
+          expiresAt: num('访问令牌过期时间 ms（可选）'),
+        },
+        required: ['url'],
+      },
+      output: TOOL_OUTPUT,
+      execute: async (args) => {
+        const a = args || {};
+        const c = gscCfg();
+        const result = await searchAnalytics({
+          clientId: a.clientId || c.clientId,
+          clientSecret: a.clientSecret || c.clientSecret,
+          accessToken: a.accessToken,
+          refreshToken: a.refreshToken,
+          expiresAt: Number(a.expiresAt) || 0,
+          rawUrl: String(a.url || '').trim(),
+          days: clampInt(a.days, 7, 90, 28),
+        });
+        return summarizeSearch(result);
+      },
+    },
+  ];
+}
+
 export function apply(ctx, config = {}) {
   const baseAuditOptions = {
     timeoutMs: config.fetchTimeoutMs ?? 15000,
@@ -231,6 +517,11 @@ export function apply(ctx, config = {}) {
     maxRedirects: config.maxRedirects ?? 5,
   };
   const basePsiKey = config.psiKey || process.env.PSI_API_KEY || undefined;
+  // Gate for the agent tools: they are `when`-gated so they exist (are
+  // described to / callable by agents) only while the workbench panel is
+  // open. The client toggles this via POST /api/tools/scope on panel
+  // mount/unmount, so other chats are never polluted.
+  let toolsEnabled = false;
   const llm = ctx.llm;
 
   // POST /api/audit — body may override fetch tunables per request.
@@ -878,5 +1169,50 @@ export function apply(ctx, config = {}) {
         },
       }),
     'seo-workbench: advice route',
+  );
+
+  // POST /api/tools/scope {enabled} — the client toggles this when the
+  // workbench panel mounts/unmounts, so the seo_* agent tools exist only
+  // while the panel is open.
+  ctx.effect(
+    () =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path: `${API}tools/scope`,
+        handler: (req, res) => {
+          if (req.method !== 'POST') {
+            sendJson(res, 405, { error: 'method-not-allowed' });
+            return;
+          }
+          readBody(req)
+            .then((raw) => {
+              let body = {};
+              try {
+                body = JSON.parse(raw || '{}');
+              } catch {
+                sendJson(res, 400, { status: 'error', error: { code: 'bad-json', message: 'invalid JSON' } });
+                return;
+              }
+              toolsEnabled = body && body.enabled === true;
+              sendJson(res, 200, { status: 'ok', enabled: toolsEnabled });
+            })
+            .catch(() => sendJson(res, 500, { status: 'error', error: { code: 'internal', message: 'internal' } }));
+        },
+      }),
+    'seo-workbench: tools scope route',
+  );
+
+  // Agent tools — `when`-gated so they are described to / callable by agents
+  // only while the workbench panel is open (toolsEnabled above). Other chats
+  // never see them.
+  ctx.effect(
+    () => {
+      const definitions = seoToolDefinitions(config, baseAuditOptions, basePsiKey);
+      const disposers = definitions.map((definition) =>
+        ctx.tools.register(definition, { when: () => toolsEnabled }),
+      );
+      return () => disposers.forEach((disposer) => disposer && disposer());
+    },
+    'seo-workbench: seo agent tools',
   );
 }
