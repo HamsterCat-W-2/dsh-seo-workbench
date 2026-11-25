@@ -21,8 +21,9 @@ window.__ModuleLoader__.load({
     const LS_SETTINGS = 'seo-wb-settings';
     const LS_HISTORY = 'seo-wb-history';
     const LS_MODEL = 'seo-wb-model';
+    const LS_GSC = 'seo-wb-gsc';
 
-    const DEFAULT_SETTINGS = { defaultSite: '', psiKey: '', timeoutMs: 15000, maxRedirects: 5, maxPages: 30, includePattern: '', excludePattern: '', pathQuotas: '' };
+    const DEFAULT_SETTINGS = { defaultSite: '', psiKey: '', cruxKey: '', timeoutMs: 15000, maxRedirects: 5, maxPages: 100, includePattern: '', excludePattern: '', pathQuotas: '', gscClientId: '', gscClientSecret: '', bingApiKey: '' };
 
     function lsGet(key, fallback) {
       try {
@@ -114,6 +115,14 @@ window.__ModuleLoader__.load({
       return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
     }
 
+    function fmtNum(n) {
+      if (n === null || n === undefined) return '-';
+      const v = Number(n);
+      if (Number.isNaN(v)) return '-';
+      if (v >= 10000) return `${(v / 10000).toFixed(1)}w`;
+      return String(Math.round(v));
+    }
+
     function fmtTime(iso) {
       if (!iso) return '';
       try {
@@ -174,7 +183,7 @@ window.__ModuleLoader__.load({
       textarea.remove();
     }
 
-    function buildMarkdown(report, deep, adviceText) {
+    function buildMarkdown(report, deep, adviceText, cruxOk) {
       const L = [];
       L.push(report.mode === 'site' ? `# SEO 站点体检报告 — ${domainOf(report.url)}` : `# SEO 分析报告 — ${report.url}`);
       L.push('');
@@ -272,6 +281,21 @@ window.__ModuleLoader__.load({
         if (deep.lighthouseIssues && deep.lighthouseIssues.length) {
           L.push(`- Lighthouse 失败项：${deep.lighthouseIssues.map((i) => (i && i.title) || String(i)).join('、')}`);
         }
+        L.push('');
+      }
+      if (cruxOk && cruxOk.status === 'ok' && cruxOk.data && cruxOk.data.hasData) {
+        L.push('## 字段数据（CrUX，真实用户 p75）');
+        L.push('');
+        const c = cruxOk.data.cwv || {};
+        const period = cruxOk.data.collectionPeriod;
+        L.push(`- 统计区间：${period && period.first ? `${period.first} ~ ${period.last}` : '过去 28 天'}　|　来源：${cruxOk.data.origin || ''}`);
+        const parts = [];
+        if (typeof c.lcpMs === 'number') parts.push(`LCP ${Math.round(c.lcpMs)}ms`);
+        if (typeof c.cls === 'number') parts.push(`CLS ${c.cls}`);
+        if (typeof c.inpMs === 'number') parts.push(`INP ${Math.round(c.inpMs)}ms`);
+        if (typeof c.fcpMs === 'number') parts.push(`FCP ${Math.round(c.fcpMs)}ms`);
+        if (typeof c.ttfbMs === 'number') parts.push(`TTFB ${Math.round(c.ttfbMs)}ms`);
+        if (parts.length) L.push(`- ${parts.join(' / ')}`);
         L.push('');
       }
       if (adviceText) {
@@ -608,6 +632,31 @@ window.__ModuleLoader__.load({
       return ERROR_CODES[code] || '深度检测失败';
     }
 
+    function mapCruxError(err) {
+      const code = err && err.code;
+      const message = err && err.message;
+      if (code === 'no-key') return message || '未配置 CrUX API Key';
+      if (code === 'bad-key') return 'CrUX API Key 无效，请检查（⚙ 设置 → 深度检测 → CrUX API Key）。';
+      if (code === 'quota') return 'CrUX 配额已用尽，换个项目或明天再试。';
+      if (code === 'no-data') return '这个站点在 CrUX 数据库里没有足够样本（访问量太低不会出现），或该协议/域名不在统计中。';
+      if (code === 'timeout') return 'CrUX 请求超时，请重试。';
+      return message || '获取字段数据失败';
+    }
+
+    function mapSearchError(err) {
+      const code = err && err.code;
+      if (code === 'no-key') return (err && err.message) || '未配置 API Key（⚙ 设置 → 搜索数据）';
+      if (code === 'no-token') return '需要先完成 Google 授权（点「获取授权链接」）。';
+      if (code === 'no-client') return '请先在 ⚙ 设置 → 搜索数据 填 Google OAuth Client ID / Secret。';
+      if (code === 'no-code') return '请先粘贴授权码。';
+      if (code === 'invalid-grant') return '授权码已失效或客户端配置不匹配，请重新获取授权链接。';
+      if (code === 'invalid-client') return 'Client ID / Secret 不正确，或 Google Cloud 里没启用 Search Console API。';
+      if (code === 'no-property') return (err && err.message) || '该网址不在你的 Search Console 已验证站点里';
+      if (code === 'unauthorized') return 'Google 授权已过期或无权限，请重新授权。';
+      if (code === 'api-failed') return (err && err.message) || '查询 API 失败';
+      return (err && err.message) || '查询失败';
+    }
+
     function DeepSection({ deep }) {
       if (!deep) return null;
       if (deep.status === 'error') {
@@ -689,6 +738,191 @@ window.__ModuleLoader__.load({
       );
     }
 
+    function CruxCard({ crux, onRun }) {
+      const loading = crux && crux.loading;
+      const data = crux && crux.status === 'ok' ? crux.data : null;
+      const err = crux && crux.status === 'error' ? crux.error : null;
+      return h(
+        'div',
+        { className: 'seo-wb-panel seo-wb-crux-panel' },
+        h(
+          'div',
+          { className: 'seo-wb-panel-head' },
+          h('div', { className: 'seo-wb-section-title' }, '字段数据（CrUX）'),
+          h('span', { className: 'seo-wb-chip' }, '真实用户 p75 · 28 天'),
+          h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-mini', onClick: onRun, disabled: !!loading }, loading ? '获取中…' : '获取字段数据'),
+        ),
+        loading ? h(Spinner, { label: '请求 CrUX…' }) : null,
+        err ? h('div', { className: 'seo-wb-error', role: 'alert' }, mapCruxError(err)) : null,
+        data
+          ? data.hasData
+            ? h(
+                'div',
+                { className: 'seo-wb-crux-body' },
+                h(
+                  'div',
+                  { className: 'seo-wb-cwv-grid' },
+                  cwvCard('LCP', data.cwv.lcpMs, 2500, 4000),
+                  cwvCard('CLS', data.cwv.cls, 0.1, 0.25),
+                  cwvCard('INP', data.cwv.inpMs, 200, 500),
+                  cwvCard('FCP', data.cwv.fcpMs, 1800, 3000),
+                  data.cwv.ttfbMs != null ? cwvCard('TTFB', data.cwv.ttfbMs, 800, 1800) : null,
+                ),
+                data.collectionPeriod && data.collectionPeriod.first
+                  ? h('div', { className: 'seo-wb-crux-note' }, `统计区间：${data.collectionPeriod.first} ~ ${data.collectionPeriod.last} · ${data.origin}`)
+                  : null,
+              )
+            : h('div', { className: 'seo-wb-empty' }, '这个站点在 CrUX 里样本不足（访问量太低的站点不会出现在 Chrome UX Report 中）')
+          : null,
+      );
+    }
+
+    function SearchResult({ provider, result }) {
+      if (!result || result.status === 'error') {
+        return h('div', { className: 'seo-wb-error', role: 'alert' }, mapSearchError(result && result.error));
+      }
+      const totals = result.totals;
+      const queries = result.queries || [];
+      const pages = result.pages || [];
+      const period = result.period ? `${result.period.start} ~ ${result.period.end}` : null;
+      return h(
+        'div',
+        { className: 'seo-wb-search-result' },
+        h('div', { className: 'seo-wb-search-site' }, `${provider === 'gsc' ? 'Google Search Console' : '必应 Webmaster'} · ${result.siteUrl || result.origin || ''}${period ? ` · ${period}` : ''}`),
+        totals
+          ? h(
+              'div',
+              { className: 'seo-wb-se-totals' },
+              totals.clicks != null ? h('div', { className: 'seo-wb-se-total' }, h('div', { className: 'seo-wb-se-total-v' }, fmtNum(totals.clicks)), h('div', { className: 'seo-wb-se-total-l' }, '点击')) : null,
+              totals.impressions != null ? h('div', { className: 'seo-wb-se-total' }, h('div', { className: 'seo-wb-se-total-v' }, fmtNum(totals.impressions)), h('div', { className: 'seo-wb-se-total-l' }, '展示')) : null,
+              totals.avgCtr != null ? h('div', { className: 'seo-wb-se-total' }, h('div', { className: 'seo-wb-se-total-v' }, `${totals.avgCtr}%`), h('div', { className: 'seo-wb-se-total-l' }, '平均 CTR')) : null,
+              totals.avgPosition != null ? h('div', { className: 'seo-wb-se-total' }, h('div', { className: 'seo-wb-se-total-v' }, fmtNum(totals.avgPosition)), h('div', { className: 'seo-wb-se-total-l' }, '平均排名')) : null,
+              totals.queries != null ? h('div', { className: 'seo-wb-se-total' }, h('div', { className: 'seo-wb-se-total-v' }, fmtNum(totals.queries)), h('div', { className: 'seo-wb-se-total-l' }, '查询数')) : null,
+            )
+          : null,
+        queries.length
+          ? h(
+              'div',
+              { className: 'seo-wb-se-block' },
+              h('div', { className: 'seo-wb-se-block-title' }, 'Top 查询词'),
+              h(
+                'div',
+                { className: 'seo-wb-se-table' },
+                h('div', { className: 'seo-wb-se-row seo-wb-se-head' }, h('span', null, '查询词'), h('span', null, '点击'), h('span', null, '展示'), h('span', null, 'CTR'), h('span', null, '排名')),
+                queries.map((q, i) =>
+                  h(
+                    'div',
+                    { key: i, className: 'seo-wb-se-row' },
+                    h('span', { className: 'seo-wb-se-query' }, q.query || '-'),
+                    h('span', null, fmtNum(q.clicks)),
+                    h('span', null, fmtNum(q.impressions)),
+                    h('span', null, typeof q.ctr === 'number' ? `${q.ctr}%` : '-'),
+                    h('span', null, typeof q.position === 'number' ? fmtNum(q.position) : typeof q.rank === 'number' ? fmtNum(q.rank) : '-'),
+                  ),
+                ),
+              ),
+            )
+          : null,
+        pages.length
+          ? h(
+              'div',
+              { className: 'seo-wb-se-block' },
+              h('div', { className: 'seo-wb-se-block-title' }, 'Top 页面'),
+              h(
+                'div',
+                { className: 'seo-wb-se-table' },
+                h('div', { className: 'seo-wb-se-row seo-wb-se-head' }, h('span', null, '页面'), h('span', null, '点击'), h('span', null, '展示'), h('span', null, '排名')),
+                pages.map((p, i) =>
+                  h(
+                    'div',
+                    { key: i, className: 'seo-wb-se-row' },
+                    h('span', { className: 'seo-wb-se-page' }, p.page || p.url || '-'),
+                    h('span', null, fmtNum(p.clicks)),
+                    h('span', null, fmtNum(p.impressions)),
+                    h('span', null, typeof p.position === 'number' ? fmtNum(p.position) : typeof p.rank === 'number' ? fmtNum(p.rank) : '-'),
+                  ),
+                ),
+              ),
+            )
+          : null,
+        (result.notes || []).length ? h('div', { className: 'seo-wb-notes' }, (result.notes || []).map((n, i) => h('div', { key: i, className: 'seo-wb-note' }, `· ${n}`))) : null,
+      );
+    }
+
+    function SearchPanel({ provider, url, onProvider, onUrl, loading, result, error, code, onCode, gscAuthorized, onAuth, onExchange, onSearch }) {
+      return h(
+        'div',
+        { className: 'seo-wb-panel seo-wb-search-panel' },
+        h(
+          'div',
+          { className: 'seo-wb-panel-head' },
+          h('div', { className: 'seo-wb-section-title' }, '搜索数据'),
+          h('span', { className: 'seo-wb-chip' }, '真实排名 · 点击 · 流量'),
+        ),
+        h(
+          'div',
+          { className: 'seo-wb-search-body' },
+          h(
+            'div',
+            { className: 'seo-wb-mode', role: 'tablist' },
+            ['gsc', 'bing'].map((p) =>
+              h(
+                'button',
+                {
+                  key: p,
+                  type: 'button',
+                  role: 'tab',
+                  'aria-selected': provider === p,
+                  className: `seo-wb-mode-btn${provider === p ? ' seo-wb-mode-active' : ''}`,
+                  onClick: () => onProvider(p),
+                },
+                p === 'gsc' ? 'Google Search Console' : '必应 Webmaster',
+              ),
+            ),
+          ),
+          h(
+            'div',
+            { className: 'seo-wb-search-row' },
+            h('input', {
+              className: 'seo-wb-input',
+              value: url,
+              onChange: (e) => onUrl(e.target.value),
+              placeholder: '站点网址，如 https://example.com',
+              'aria-label': '搜索数据站点网址',
+            }),
+            h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-primary', onClick: onSearch, disabled: !!loading }, loading ? '查询中…' : '查询'),
+          ),
+          provider === 'gsc'
+            ? h(
+                'div',
+                { className: 'seo-wb-search-auth' },
+                gscAuthorized
+                  ? h('div', { className: 'seo-wb-search-auth-ok' }, '✓ 已授权 Google Search Console（令牌保存在本地）')
+                  : h(
+                      'div',
+                      { className: 'seo-wb-search-auth-cta' },
+                      '先在 ⚙ 设置 → 搜索数据 填 Google OAuth Client ID / Secret，然后：',
+                      h(
+                        'div',
+                        { className: 'seo-wb-search-auth-steps' },
+                        h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-mini', onClick: onAuth }, '① 获取授权链接（会打开 Google 登录）'),
+                      ),
+                      h(
+                        'div',
+                        { className: 'seo-wb-search-auth-code' },
+                        h('input', { className: 'seo-wb-input', value: code, onChange: (e) => onCode(e.target.value), placeholder: '② 登录后把授权码粘贴到这里' }),
+                        h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-mini', onClick: onExchange }, '③ 完成授权'),
+                      ),
+                    ),
+              )
+            : null,
+          error ? h('div', { className: 'seo-wb-error', role: 'alert' }, error) : null,
+          loading ? h(Spinner, { label: provider === 'gsc' ? '查询 Search Console…' : '查询必应 Webmaster…' }) : null,
+          result ? h(SearchResult, { provider, result }) : null,
+        ),
+      );
+    }
+
     // ------------------------------------------------------------- settings
 
     const SETTINGS_SECTIONS = [
@@ -706,13 +940,23 @@ window.__ModuleLoader__.load({
         hint: '只影响单页分析（含深度检测的 PageSpeed 回退）',
         fields: [
           ['psiKey', 'PageSpeed API Key', 'text', '可选；仅当本机没有 Chrome 时深度检测才回退到 PageSpeed', 'AIza…'],
+          ['cruxKey', 'CrUX API Key', 'text', '可选；「字段数据」卡片用它拉真实用户 CWV（Chrome UX Report API）', 'AIza…'],
+        ],
+      },
+      {
+        title: '搜索数据',
+        hint: '真实排名 / 点击 / 流量（GSC 走 OAuth 授权，必应走 API Key）',
+        fields: [
+          ['gscClientId', 'Google OAuth Client ID', 'text', 'Google Cloud → API 和服务 → 凭据 → 创建 OAuth 客户端（桌面应用）', ''],
+          ['gscClientSecret', 'Google OAuth Client Secret', 'text', '与上面的 Client ID 配套', ''],
+          ['bingApiKey', 'Bing API Key', 'text', 'bing.com/webmasters → API 访问 → 生成密钥', ''],
         ],
       },
       {
         title: '站点体检',
         hint: '只影响站点体检的爬虫行为',
         fields: [
-          ['maxPages', '站点体检最大页数', 'text', '单次抓取上限，默认 30（2–200）', '30'],
+          ['maxPages', '站点体检最大页数', 'text', '单次抓取上限，默认 100（2–200）', '100'],
           ['includePattern', '只抓这些路径（正则，可空）', 'text', '作用于站内链接的「路径+查询串」；例 ^/blog/ 只抓博客区；留空 = 全部', '^/blog/'],
           ['excludePattern', '排除这些路径（正则，可空）', 'text', '跳过匹配的站内链接；例 ^/detail/ 跳过详情页（几万页也不会占满上限）；留空 = 不排除', '^/detail/'],
           ['pathQuotas', '路径配额（每行一条：正则=页数）', 'textarea', '例：^/detail/=10 — /detail/ 最多抓 10 页，其余跳过，不占其他页面的额度；留空 = 不限制', '^/detail/=10'],
@@ -792,6 +1036,10 @@ window.__ModuleLoader__.load({
       const [report, setReport] = useState(null);
       const [deep, setDeep] = useState(null);
       const [advice, setAdvice] = useState({ loading: false, text: '', error: null });
+      const [crux, setCrux] = useState(null); // {loading} | {status:'ok',data:{...}} | {status:'error',error}
+      const [search, setSearch] = useState({ provider: 'gsc', loading: false, result: null, error: null, code: '' });
+      const [gscToken, setGscToken] = useState(() => lsGet(LS_GSC, {}));
+      const [searchUrl, setSearchUrl] = useState('');
       const [error, setError] = useState(null);
       const [tab, setTab] = useState('issues');
       const [openIssue, setOpenIssue] = useState(null);
@@ -879,6 +1127,7 @@ window.__ModuleLoader__.load({
           if (data.status === 'error') throw new Error((data.error && data.error.message) || '审计失败');
           setReport(data);
           setDeep(null);
+          setCrux(null);
           setAdvice({ loading: false, text: '', error: null });
           setTab('issues');
           setOpenIssue(null);
@@ -921,6 +1170,7 @@ window.__ModuleLoader__.load({
           if (data.status === 'error') throw new Error((data.error && data.error.message) || '站点体检失败');
           setReport(data);
           setDeep(null);
+          setCrux(null);
           setAdvice({ loading: false, text: '', error: null });
           setTab('issues');
           setOpenIssue(null);
@@ -1003,6 +1253,121 @@ window.__ModuleLoader__.load({
         }
       }
 
+      async function runCruxField() {
+        if (!report) return;
+        const key = String(settings.cruxKey || '').trim();
+        setCrux({ loading: true });
+        try {
+          const data = await postJson('/seo-workbench/api/crux', { url: report.url, key: key || undefined });
+          if (data.status !== 'ok') {
+            setCrux({ status: 'error', error: (data && data.error) || { message: 'CrUX 查询失败' } });
+          } else {
+            setCrux({ status: 'ok', data });
+          }
+        } catch (err) {
+          setCrux({ status: 'error', error: { message: err.message || String(err) } });
+        }
+      }
+
+      async function requestGscAuth() {
+        const clientId = String(settings.gscClientId || '').trim();
+        if (!clientId) {
+          setSearch((s) => ({ ...s, error: '请先在 ⚙ 设置 → 搜索数据 填 Google OAuth Client ID / Secret。' }));
+          return;
+        }
+        try {
+          const resp = await fetch(
+            `/seo-workbench/api/gsc/auth-url?clientId=${encodeURIComponent(clientId)}&redirectUri=${encodeURIComponent('urn:ietf:wg:oauth:2.0:oob')}`,
+            { credentials: 'same-origin', cache: 'no-store' },
+          );
+          const data = await resp.json();
+          if (data.status !== 'ok') {
+            setSearch((s) => ({ ...s, error: mapSearchError(data.error) }));
+            return;
+          }
+          window.open(data.url, '_blank', 'noopener');
+        } catch (err) {
+          setSearch((s) => ({ ...s, error: err.message || String(err) }));
+        }
+      }
+
+      async function finishGscAuth() {
+        const code = String(search.code || '').trim();
+        const clientId = String(settings.gscClientId || '').trim();
+        const clientSecret = String(settings.gscClientSecret || '').trim();
+        if (!code) {
+          setSearch((s) => ({ ...s, error: '请先粘贴授权码。' }));
+          return;
+        }
+        try {
+          const data = await postJson('/seo-workbench/api/gsc/token', { clientId, clientSecret, code });
+          if (data.status !== 'ok') {
+            setSearch((s) => ({ ...s, error: mapSearchError(data.error) }));
+            return;
+          }
+          const token = { accessToken: data.accessToken || '', refreshToken: data.refreshToken || '', expiresAt: Date.now() + (Number(data.expiresIn) || 3600) * 1000 };
+          setGscToken(token);
+          lsSet(LS_GSC, token);
+          setSearch((s) => ({ ...s, error: null, code: '' }));
+        } catch (err) {
+          setSearch((s) => ({ ...s, error: err.message || String(err) }));
+        }
+      }
+
+      async function runSearchData() {
+        const raw = String(searchUrl || input || '').trim();
+        const { url, error: urlError } = normalizeUrl(raw);
+        if (urlError) {
+          setSearch((s) => ({ ...s, error: urlError }));
+          return;
+        }
+        if (search.provider === 'gsc') {
+          const clientId = String(settings.gscClientId || '').trim();
+          const clientSecret = String(settings.gscClientSecret || '').trim();
+          const token = gscToken || {};
+          if (!token.accessToken && !token.refreshToken) {
+            setSearch((s) => ({ ...s, error: '需要先完成 Google 授权（点「获取授权链接」）。' }));
+            return;
+          }
+          setSearch((s) => ({ ...s, loading: true, result: null, error: null }));
+          try {
+            const data = await postJson('/seo-workbench/api/gsc/search', {
+              url,
+              clientId,
+              clientSecret,
+              accessToken: token.accessToken,
+              refreshToken: token.refreshToken,
+              expiresAt: token.expiresAt,
+              days: 28,
+            });
+            if (data.refreshed) {
+              const next = { accessToken: data.refreshed.accessToken, refreshToken: data.refreshed.refreshToken || token.refreshToken, expiresAt: data.refreshed.expiresAt };
+              setGscToken(next);
+              lsSet(LS_GSC, next);
+            }
+            if (data.status !== 'ok') {
+              setSearch((s) => ({ ...s, loading: false, result: null, error: mapSearchError(data.error) }));
+            } else {
+              setSearch((s) => ({ ...s, loading: false, result: data }));
+            }
+          } catch (err) {
+            setSearch((s) => ({ ...s, loading: false, result: null, error: err.message || String(err) }));
+          }
+          return;
+        }
+        setSearch((s) => ({ ...s, loading: true, result: null, error: null }));
+        try {
+          const data = await postJson('/seo-workbench/api/bing', { url, apiKey: String(settings.bingApiKey || '').trim() || undefined });
+          if (data.status !== 'ok') {
+            setSearch((s) => ({ ...s, loading: false, result: null, error: mapSearchError(data.error) }));
+          } else {
+            setSearch((s) => ({ ...s, loading: false, result: data }));
+          }
+        } catch (err) {
+          setSearch((s) => ({ ...s, loading: false, result: null, error: err.message || String(err) }));
+        }
+      }
+
       function removeHistory(id) {
         setHistory((prev) => prev.filter((x) => x.id !== id));
       }
@@ -1011,6 +1376,7 @@ window.__ModuleLoader__.load({
         setMode(entry.mode || 'page');
         setReport(entry.report);
         setDeep(entry.deep || null);
+        setCrux(null);
         setAdvice({ loading: false, text: (entry.advice && entry.advice.text) || '', error: null });
         setTab('issues');
         setOpenIssue(null);
@@ -1019,11 +1385,11 @@ window.__ModuleLoader__.load({
       }
       function exportMd() {
         if (!report) return;
-        downloadText(`seo-report-${domainOf(report.url)}-${new Date().toISOString().slice(0, 10)}.md`, buildMarkdown(report, deep, advice.text));
+        downloadText(`seo-report-${domainOf(report.url)}-${new Date().toISOString().slice(0, 10)}.md`, buildMarkdown(report, deep, advice.text, cruxOk));
       }
       function copyMd() {
         if (!report) return;
-        copyText(buildMarkdown(report, deep, advice.text));
+        copyText(buildMarkdown(report, deep, advice.text, cruxOk));
         setCopied('md');
         setTimeout(() => setCopied(null), 1500);
       }
@@ -1040,6 +1406,7 @@ window.__ModuleLoader__.load({
         }
       }
 
+      const cruxOk = crux && crux.status === 'ok' && crux.data ? crux : null;
       const issueCount = report && report.issues ? report.issues.length : 0;
       const isSiteReport = report && report.mode === 'site';
       const tabLabel = (id) => (id === 'issues' ? `问题（${issueCount}）` : id === 'details' ? '检查明细' : id === 'overview' ? (isSiteReport ? '站点概览' : '页面概况') : 'AI 建议');
@@ -1176,6 +1543,7 @@ window.__ModuleLoader__.load({
                 ),
               ),
               isSiteReport ? null : h(DeepSection, { deep }),
+              isSiteReport ? null : h(CruxCard, { crux, onRun: runCruxField }),
               h(
                 'div',
                 { className: 'seo-wb-tabs', role: 'tablist' },
@@ -1291,6 +1659,21 @@ window.__ModuleLoader__.load({
                 : h('div', { className: 'seo-wb-empty' }, '还没有分析记录 — 输入网址开始第一次分析')
               : null,
           ),
+        h(SearchPanel, {
+          provider: search.provider,
+          url: searchUrl,
+          onProvider: (p) => setSearch((s) => ({ ...s, provider: p, result: null, error: null })),
+          onUrl: setSearchUrl,
+          loading: search.loading,
+          result: search.result,
+          error: search.error,
+          code: search.code,
+          onCode: (v) => setSearch((s) => ({ ...s, code: v })),
+          gscAuthorized: !!(gscToken && gscToken.refreshToken),
+          onAuth: requestGscAuth,
+          onExchange: finishGscAuth,
+          onSearch: runSearchData,
+        }),
       );
     }
 
@@ -1471,6 +1854,29 @@ window.__ModuleLoader__.load({
 .seo-wb-page-bad { color: var(--dsw-alias-state-error-primary); font-weight: 600; }
 .seo-wb-page-flags { display: flex; flex-wrap: wrap; gap: 4px; }
 .seo-wb-badge-site { color: var(--dsw-alias-state-warn-primary); background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 12%, transparent); }
+.seo-wb-search-panel { margin-top: 24px; }
+.seo-wb-search-body { display: flex; flex-direction: column; gap: 10px; }
+.seo-wb-search-row { display: flex; gap: 8px; }
+.seo-wb-input { flex: 1; min-width: 0; background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; padding: 8px 10px; font-size: 13px; font-family: inherit; }
+.seo-wb-input:focus { border-color: var(--dsw-alias-brand-primary); outline: none; }
+.seo-wb-search-auth { display: flex; flex-direction: column; gap: 8px; font-size: 12px; color: var(--dsw-alias-label-secondary); }
+.seo-wb-search-auth-steps, .seo-wb-search-auth-code { display: flex; gap: 8px; align-items: center; }
+.seo-wb-search-auth-ok { font-size: 12px; color: var(--dsw-alias-state-success-primary); }
+.seo-wb-search-result { display: flex; flex-direction: column; gap: 12px; }
+.seo-wb-search-site { font-size: 12px; color: var(--dsw-alias-label-secondary); word-break: break-all; }
+.seo-wb-se-totals { display: flex; gap: 10px; flex-wrap: wrap; }
+.seo-wb-se-total { background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1); border-radius: 10px; padding: 10px 14px; min-width: 96px; }
+.seo-wb-se-total-v { font-size: 18px; font-weight: 700; }
+.seo-wb-se-total-l { font-size: 11px; color: var(--dsw-alias-label-secondary); margin-top: 2px; }
+.seo-wb-se-block-title { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+.seo-wb-se-table { border: 1px solid var(--dsw-alias-border-l1); border-radius: 10px; overflow: hidden; }
+.seo-wb-se-row { display: grid; grid-template-columns: minmax(0, 1fr) repeat(4, 64px); gap: 8px; padding: 8px 10px; font-size: 12px; align-items: center; border-top: 1px solid var(--dsw-alias-border-l1); }
+.seo-wb-se-row:first-child { border-top: none; }
+.seo-wb-se-head { font-weight: 600; color: var(--dsw-alias-label-secondary); background: var(--dsw-alias-bg-layer-2); }
+.seo-wb-se-query, .seo-wb-se-page { word-break: break-all; min-width: 0; }
+.seo-wb-crux-panel { margin-top: 16px; }
+.seo-wb-crux-body { display: flex; flex-direction: column; gap: 8px; }
+.seo-wb-crux-note { font-size: 12px; color: var(--dsw-alias-label-secondary); }
 `;
 
     // ------------------------------------------------------------ register

@@ -10,9 +10,12 @@
 
 import http from 'node:http';
 import { runAudit } from '../lib/engine.js';
-import { hasMixedContent } from '../lib/parse.js';
+import { hasMixedContent, parseRobots } from '../lib/parse.js';
 import { crawlSite } from '../lib/crawl.js';
 import { buildSiteReport } from '../lib/site.js';
+import { runCrux } from '../lib/crux.js';
+import { runBingSearch } from '../lib/bing.js';
+import { buildAuthUrl } from '../lib/gsc.js';
 
 const PAGE = `<!doctype html>
 <html>
@@ -299,6 +302,27 @@ try {
   assert(thinRow, '应标记薄内容页 /thin');
   const deadRow = site.pages.find((p) => p.failed && p.url.includes('/dead-404'));
   assert(deadRow, '应标记死链页 /dead-404 为 failed');
+
+  // ---- field data (CrUX): no key → offline no-key error (no network call).
+  const cruxNoKey = await runCrux('https://example.com/');
+  assert(cruxNoKey.status === 'error' && cruxNoKey.error.code === 'no-key', `CrUX 无 key 应返回 no-key，实际 ${JSON.stringify(cruxNoKey)}`);
+
+  // ---- Bing: no key → offline no-key error.
+  const bingNoKey = await runBingSearch('https://example.com/');
+  assert(bingNoKey.status === 'error' && bingNoKey.error.code === 'no-key', `必应无 key 应返回 no-key，实际 ${JSON.stringify(bingNoKey)}`);
+
+  // ---- GSC auth URL: missing client id → error; valid id → google accounts URL with readonly scope.
+  const gscBad = buildAuthUrl({});
+  assert(gscBad.status === 'error' && gscBad.error.code === 'no-client-id', `GSC 缺 clientId 应返回 no-client-id，实际 ${JSON.stringify(gscBad)}`);
+  const gscUrl = buildAuthUrl({ clientId: 'abc.apps.googleusercontent.com' });
+  assert(
+    gscUrl.status === 'ok' && gscUrl.url.includes('accounts.google.com') && gscUrl.url.includes('webmasters.readonly'),
+    `GSC 授权链接应包含 accounts.google.com 与只读 scope，实际 ${JSON.stringify(gscUrl)}`,
+  );
+
+  // ---- robots Crawl-delay parsing.
+  const robotsCd = parseRobots('User-agent: *\nCrawl-delay: 2\nSitemap: https://example.com/sitemap.xml\n');
+  assert(robotsCd.crawlDelay === 2 && robotsCd.sitemaps.length === 1 && !robotsCd.disallowAll, `robots Crawl-delay 解析错误：${JSON.stringify(robotsCd)}`);
 
   console.log('PASS smoke test');
   console.log(

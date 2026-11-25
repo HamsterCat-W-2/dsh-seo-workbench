@@ -20,6 +20,9 @@ import { runAudit, runPageSpeed } from './lib/engine.js';
 import { runLocalDeep } from './lib/localdeep.js';
 import { crawlSite } from './lib/crawl.js';
 import { buildSiteReport } from './lib/site.js';
+import { runCrux } from './lib/crux.js';
+import { runBingSearch } from './lib/bing.js';
+import { buildAuthUrl, exchangeCode, listSites, searchAnalytics } from './lib/gsc.js';
 
 export const inject = ['webServer', 'llm'];
 
@@ -345,6 +348,208 @@ export function apply(ctx, config = {}) {
         },
       }),
     'seo-workbench: models route',
+  );
+
+  // POST /api/crux — field Core Web Vitals from the Chrome UX Report (real users, p75).
+  ctx.effect(
+    () =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path: `${API}crux`,
+        handler: (req, res) => {
+          if (req.method !== 'POST') {
+            sendJson(res, 405, { error: 'method-not-allowed' });
+            return;
+          }
+          readBody(req)
+            .then(async (raw) => {
+              let body = {};
+              try {
+                body = JSON.parse(raw || '{}');
+              } catch {
+                sendJson(res, 400, { status: 'error', error: { code: 'bad-json', message: 'invalid JSON' } });
+                return;
+              }
+              const url = body && typeof body.url === 'string' ? body.url.trim() : '';
+              const key = (body && typeof body.key === 'string' && body.key.trim()) || (config && config.cruxKey) || process.env.CRUX_API_KEY || '';
+              const result = await runCrux(url, { key });
+              sendJson(res, 200, result);
+            })
+            .catch(() => sendJson(res, 500, { status: 'error', error: { code: 'internal', message: 'internal' } }));
+        },
+      }),
+    'seo-workbench: crux route',
+  );
+
+  // POST /api/bing — Bing Webmaster search data (key-based).
+  ctx.effect(
+    () =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path: `${API}bing`,
+        handler: (req, res) => {
+          if (req.method !== 'POST') {
+            sendJson(res, 405, { error: 'method-not-allowed' });
+            return;
+          }
+          readBody(req)
+            .then(async (raw) => {
+              let body = {};
+              try {
+                body = JSON.parse(raw || '{}');
+              } catch {
+                sendJson(res, 400, { status: 'error', error: { code: 'bad-json', message: 'invalid JSON' } });
+                return;
+              }
+              const url = body && typeof body.url === 'string' ? body.url.trim() : '';
+              const apiKey = (body && typeof body.apiKey === 'string' && body.apiKey.trim()) || (config && config.bingApiKey) || process.env.BING_API_KEY || '';
+              const result = await runBingSearch(url, { apiKey });
+              sendJson(res, 200, result);
+            })
+            .catch(() => sendJson(res, 500, { status: 'error', error: { code: 'internal', message: 'internal' } }));
+        },
+      }),
+    'seo-workbench: bing route',
+  );
+
+  // GSC (Google Search Console) — OAuth2 + search analytics.
+  const gscConfig = () => ({
+    clientId: (config && config.gscClientId) || process.env.GSC_CLIENT_ID || '',
+    clientSecret: (config && config.gscClientSecret) || process.env.GSC_CLIENT_SECRET || '',
+  });
+
+  // GET /api/gsc/auth-url?clientId=&redirectUri= — build the consent URL.
+  ctx.effect(
+    () =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path: `${API}gsc/auth-url`,
+        handler: (req, res) => {
+          if (req.method !== 'GET') {
+            sendJson(res, 405, { error: 'method-not-allowed' });
+            return;
+          }
+          try {
+            const u = new URL(req.url, 'http://local');
+            const cfg = gscConfig();
+            const clientId = u.searchParams.get('clientId') || cfg.clientId;
+            const redirectUri = u.searchParams.get('redirectUri') || 'urn:ietf:wg:oauth:2.0:oob';
+            const result = buildAuthUrl({ clientId, redirectUri });
+            sendJson(res, 200, result);
+          } catch (err) {
+            sendJson(res, 500, { status: 'error', error: { code: 'internal', message: String((err && err.message) || err) } });
+          }
+        },
+      }),
+    'seo-workbench: gsc auth-url route',
+  );
+
+  // POST /api/gsc/token {clientId, clientSecret, code} — exchange authorization code.
+  ctx.effect(
+    () =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path: `${API}gsc/token`,
+        handler: (req, res) => {
+          if (req.method !== 'POST') {
+            sendJson(res, 405, { error: 'method-not-allowed' });
+            return;
+          }
+          readBody(req)
+            .then(async (raw) => {
+              let body = {};
+              try {
+                body = JSON.parse(raw || '{}');
+              } catch {
+                sendJson(res, 400, { status: 'error', error: { code: 'bad-json', message: 'invalid JSON' } });
+                return;
+              }
+              const cfg = gscConfig();
+              const result = await exchangeCode({
+                clientId: (body && body.clientId) || cfg.clientId,
+                clientSecret: (body && body.clientSecret) || cfg.clientSecret,
+                code: body && body.code,
+              });
+              sendJson(res, 200, result);
+            })
+            .catch(() => sendJson(res, 500, { status: 'error', error: { code: 'internal', message: 'internal' } }));
+        },
+      }),
+    'seo-workbench: gsc token route',
+  );
+
+  // POST /api/gsc/sites — list verified properties (token may refresh).
+  ctx.effect(
+    () =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path: `${API}gsc/sites`,
+        handler: (req, res) => {
+          if (req.method !== 'POST') {
+            sendJson(res, 405, { error: 'method-not-allowed' });
+            return;
+          }
+          readBody(req)
+            .then(async (raw) => {
+              let body = {};
+              try {
+                body = JSON.parse(raw || '{}');
+              } catch {
+                sendJson(res, 400, { status: 'error', error: { code: 'bad-json', message: 'invalid JSON' } });
+                return;
+              }
+              const cfg = gscConfig();
+              const result = await listSites({
+                clientId: (body && body.clientId) || cfg.clientId,
+                clientSecret: (body && body.clientSecret) || cfg.clientSecret,
+                accessToken: body && body.accessToken,
+                refreshToken: body && body.refreshToken,
+                expiresAt: body && Number(body.expiresAt) || 0,
+              });
+              sendJson(res, 200, result);
+            })
+            .catch(() => sendJson(res, 500, { status: 'error', error: { code: 'internal', message: 'internal' } }));
+        },
+      }),
+    'seo-workbench: gsc sites route',
+  );
+
+  // POST /api/gsc/search {url, days, tokens} — clicks/impressions/position + top queries/pages.
+  ctx.effect(
+    () =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path: `${API}gsc/search`,
+        handler: (req, res) => {
+          if (req.method !== 'POST') {
+            sendJson(res, 405, { error: 'method-not-allowed' });
+            return;
+          }
+          readBody(req)
+            .then(async (raw) => {
+              let body = {};
+              try {
+                body = JSON.parse(raw || '{}');
+              } catch {
+                sendJson(res, 400, { status: 'error', error: { code: 'bad-json', message: 'invalid JSON' } });
+                return;
+              }
+              const cfg = gscConfig();
+              const result = await searchAnalytics({
+                clientId: (body && body.clientId) || cfg.clientId,
+                clientSecret: (body && body.clientSecret) || cfg.clientSecret,
+                accessToken: body && body.accessToken,
+                refreshToken: body && body.refreshToken,
+                expiresAt: body && Number(body.expiresAt) || 0,
+                rawUrl: body && typeof body.url === 'string' ? body.url : '',
+                days: body && Number(body.days) || 28,
+              });
+              sendJson(res, 200, result);
+            })
+            .catch(() => sendJson(res, 500, { status: 'error', error: { code: 'internal', message: 'internal' } }));
+        },
+      }),
+    'seo-workbench: gsc search route',
   );
 
   // POST /api/advice — AI fix plan generated by the model chosen in the client.
