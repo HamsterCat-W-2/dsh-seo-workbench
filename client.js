@@ -1801,6 +1801,19 @@ window.__ModuleLoader__.load({
         }
       }
 
+      function backToList() {
+        setReport(null);
+        setDeep(null);
+        setAdvice({ loading: false, text: '', error: null });
+        setCrux(null);
+        setKeywords({ loading: false, error: null, data: null });
+        setSearch({ provider: 'gsc', url: '', loading: false, result: null, error: null, code: '', status: '' });
+        setSearchUrl('');
+        setIndexStatus({ loading: false, error: null, data: null });
+        setTab('issues');
+        setError(null);
+      }
+
       function removeHistory(id) {
         setHistory((prev) => prev.filter((x) => x.id !== id));
       }
@@ -1913,7 +1926,7 @@ window.__ModuleLoader__.load({
           ),
         ),
 
-        h(
+        !report ? h(
           'div',
           { className: 'seo-wb-mode', role: 'tablist', 'aria-label': '分析模式' },
           [
@@ -1933,9 +1946,9 @@ window.__ModuleLoader__.load({
               label,
             ),
           ),
-        ),
+        ) : null,
 
-        h(
+        !report ? h(
           'div',
           { className: 'seo-wb-analyze' },
           h('input', {
@@ -1958,9 +1971,9 @@ window.__ModuleLoader__.load({
             { type: 'button', className: 'seo-wb-btn seo-wb-btn-primary seo-wb-analyze-btn', onClick: startAnalyze, disabled: !!busy },
             busy === 'audit' ? '分析中…' : busy === 'site' ? '体检中…' : mode === 'site' ? '站点体检' : '分析',
           ),
-        ),
+        ) : null,
 
-        h(Progress, { progress }),
+        !report ? h(Progress, { progress }) : null,
         h(Spinner, {
           label: busy === 'deep' ? '深度检测中…' : busy === 'advice' ? '正在生成 AI 建议…' : busy === 'audit' ? '分析中…' : busy === 'site' ? '站点体检中…（最多抓取设置里的页数）' : null,
         }),
@@ -1969,6 +1982,15 @@ window.__ModuleLoader__.load({
 
         report
           ? h(
+              'div',
+              { className: 'seo-wb-detail' },
+              h(
+                'div',
+                { className: 'seo-wb-detail-head' },
+                h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-ghost seo-wb-back', onClick: backToList, 'aria-label': '返回分析列表' }, '← 返回列表'),
+                h('span', { className: 'seo-wb-detail-hint' }, '分析详情'),
+              ),
+              h(
               'div',
               { className: 'seo-wb-report' },
               h(
@@ -2077,12 +2099,13 @@ window.__ModuleLoader__.load({
                     (report.notes || []).map((n, idx) => h('div', { key: idx, className: 'seo-wb-note' }, `· ${n}`)),
                   )
                 : null,
+              ),
             )
           : !busy
             ? h('div', { className: 'seo-wb-empty seo-wb-empty-hero' }, mode === 'site' ? '输入站点域名，点击「站点体检」：自动抓取站内页面，检查重复标题/描述、薄内容、孤儿页、死链，并给出整站评分' : '输入网址，点击「分析」，查看可抓取性、技术基础、On-Page 与内容质量评分')
             : null,
 
-        h(
+        !report ? h(
           'div',
           { className: 'seo-wb-panel seo-wb-history-panel' },
             h(
@@ -2175,7 +2198,7 @@ window.__ModuleLoader__.load({
                   )
                 : h('div', { className: 'seo-wb-empty' }, '还没有分析记录 — 输入网址开始第一次分析')
               : null,
-          ),
+          ) : null,
       );
     }
 
@@ -2247,6 +2270,9 @@ window.__ModuleLoader__.load({
 .seo-wb-project-count { color: var(--dsw-alias-label-secondary); font-weight: 400; font-size: 12px; }
 .seo-wb-project-entries { border-top: 1px solid var(--dsw-alias-border-l1); }
 .seo-wb-perf { display: flex; flex-direction: column; gap: 16px; margin-top: 16px; }
+.seo-wb-detail-head { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+.seo-wb-back { display: inline-flex; align-items: center; gap: 4px; }
+.seo-wb-detail-hint { font-size: 12px; color: var(--dsw-alias-label-secondary); }
 .seo-wb-issues, .seo-wb-details { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
 .seo-wb-issue, .seo-wb-group { background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l1); border-radius: 10px; overflow: hidden; }
 .seo-wb-issue-head, .seo-wb-group-head { display: flex; align-items: center; gap: 10px; padding: 11px 14px; cursor: pointer; user-select: none; }
