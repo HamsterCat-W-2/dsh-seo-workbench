@@ -183,7 +183,7 @@ window.__ModuleLoader__.load({
       textarea.remove();
     }
 
-    function buildMarkdown(report, deep, adviceText, cruxOk, searchOk, keywordsOk) {
+    function buildMarkdown(report, deep, adviceText, cruxOk, searchOk, keywordsOk, indexOk) {
       const L = [];
       L.push(report.mode === 'site' ? `# SEO 站点体检报告 — ${domainOf(report.url)}` : `# SEO 分析报告 — ${report.url}`);
       L.push('');
@@ -319,6 +319,29 @@ window.__ModuleLoader__.load({
           L.push('| --- | --- | --- | --- |');
           for (const q of sr.queries.slice(0, 10)) {
             L.push(`| ${q.query || '-'} | ${q.clicks ?? '-'} | ${q.impressions ?? '-'} | ${q.position ?? q.rank ?? '-'} |`);
+          }
+        }
+        L.push('');
+      }
+      if (indexOk && indexOk.data) {
+        const idx = indexOk.data;
+        L.push('## 索引状态（GSC Coverage）');
+        L.push('');
+        if (idx.siteUrl) L.push(`- 站点：${idx.siteUrl}`);
+        if ((idx.sitemaps || []).length) {
+          L.push('');
+          L.push('| sitemap 路径 | 已提交 | 已索引 | 错误/警告 |');
+          L.push('| --- | --- | --- | --- |');
+          for (const m of idx.sitemaps) {
+            L.push(`| ${m.path || '-'} | ${m.submitted ?? '-'} | ${m.indexed ?? '-'} | ${[m.errors, m.warnings].filter(Boolean).join(' / ') || '无'} |`);
+          }
+        }
+        if ((idx.results || []).length) {
+          L.push('');
+          L.push('| URL | 判定 | 覆盖状态 | 抓取状态 |');
+          L.push('| --- | --- | --- | --- |');
+          for (const r of idx.results) {
+            L.push(`| ${r.url || '-'} | ${r.error ? '✗' : r.verdict || '-'} | ${r.error ? '-' : r.coverageState || '-'} | ${r.error ? r.error : r.pageFetchState || '-'} |`);
           }
         }
         L.push('');
@@ -1095,6 +1118,92 @@ window.__ModuleLoader__.load({
       );
     }
 
+    function IndexStatusPanel({ status, onRun }) {
+      if (!status || !status.data) {
+        return h(
+          'div',
+          { className: 'seo-wb-panel seo-wb-search-panel' },
+          h('div', { className: 'seo-wb-panel-head' }, h('div', { className: 'seo-wb-section-title' }, '索引状态（GSC Coverage）'), h('span', { className: 'seo-wb-chip' }, '已索引 vs 应索引 · URL 抽查')),
+          h(
+            'div',
+            { className: 'seo-wb-search-body' },
+            h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-primary', onClick: onRun, disabled: !!status.loading }, status.loading ? '获取中…' : '获取索引状态'),
+            status.loading ? h(Spinner, { label: '读取 Search Console 覆盖率…' }) : null,
+            status.error ? h('div', { className: 'seo-wb-error', role: 'alert' }, status.error) : null,
+          ),
+        );
+      }
+      const data = status.data;
+      const sitemaps = data.sitemaps || [];
+      const results = data.results || [];
+      const coverMap = {
+        SUBMITTED_AND_INDEXED: '已提交并已索引',
+        SUBMITTED_BUT_NOT_INDEXED: '已提交但未索引',
+        NOT_SUBMITTED_AND_NOT_INDEXED: '未提交未索引',
+        INDEXED: '已索引',
+        NOT_INDEXED: '未索引',
+        DUPLICATE: '重复内容',
+        EXCLUDED: '已排除',
+        PAGE_NOT_FETCHED: '未抓取',
+        DISCOVERED_CRAWL: '发现未抓取',
+      };
+      const verdictMap = { PASS: '正常', PARTIAL: '部分问题', FAIL: '有问题', NEUTRAL: '中性' };
+      return h(
+        'div',
+        { className: 'seo-wb-panel seo-wb-search-panel' },
+        h('div', { className: 'seo-wb-panel-head' }, h('div', { className: 'seo-wb-section-title' }, '索引状态（GSC Coverage）'), h('span', { className: 'seo-wb-chip' }, data.siteUrl || '')),
+        h(
+          'div',
+          { className: 'seo-wb-search-body' },
+          h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-primary', onClick: onRun, disabled: !!status.loading }, status.loading ? '刷新中…' : '刷新索引状态'),
+          sitemaps.length
+            ? h(
+                'div',
+                { className: 'seo-wb-se-block' },
+                h('div', { className: 'seo-wb-se-block-title' }, `sitemap 提交状态（${sitemaps.length}）`),
+                h(
+                  'div',
+                  { className: 'seo-wb-se-table' },
+                  h('div', { className: 'seo-wb-se-row seo-wb-se-head' }, h('span', null, '路径'), h('span', null, '已提交'), h('span', null, '已索引'), h('span', null, '错误/警告')),
+                  sitemaps.map((m, i) =>
+                    h(
+                      'div',
+                      { key: i, className: 'seo-wb-se-row' },
+                      h('span', { className: 'seo-wb-se-page' }, m.path || '-'),
+                      h('span', null, fmtNum(m.submitted)),
+                      h('span', null, fmtNum(m.indexed)),
+                      h('span', null, [m.errors, m.warnings].filter(Boolean).join(' / ') || '无'),
+                    ),
+                  ),
+                ),
+              )
+            : h('div', { className: 'seo-wb-note' }, '· Search Console 里没有 sitemap 记录'),
+          results.length
+            ? h(
+                'div',
+                { className: 'seo-wb-se-block' },
+                h('div', { className: 'seo-wb-se-block-title' }, `URL 抽查（${results.length}）`),
+                h(
+                  'div',
+                  { className: 'seo-wb-se-table' },
+                  h('div', { className: 'seo-wb-se-row seo-wb-se-head' }, h('span', null, 'URL'), h('span', null, '判定'), h('span', null, '覆盖状态'), h('span', null, '抓取状态')),
+                  results.map((r, i) =>
+                    h(
+                      'div',
+                      { key: i, className: 'seo-wb-se-row' },
+                      h('span', { className: 'seo-wb-se-page' }, r.url || '-'),
+                      h('span', null, r.error ? '✗' : (verdictMap[r.verdict] || r.verdict || '-')),
+                      h('span', null, r.error ? '-' : (coverMap[r.coverageState] || r.coverageState || '-')),
+                      h('span', null, r.error ? r.error : (r.pageFetchState || '-')),
+                    ),
+                  ),
+                ),
+              )
+            : null,
+        ),
+      );
+    }
+
     // ------------------------------------------------------------- settings
 
     const SETTINGS_SECTIONS = [
@@ -1213,6 +1322,7 @@ window.__ModuleLoader__.load({
       const [search, setSearch] = useState({ provider: 'gsc', loading: false, result: null, error: null, code: '', status: '' });
       const [gscToken, setGscToken] = useState(() => lsGet(LS_GSC, {}));
       const [searchUrl, setSearchUrl] = useState('');
+      const [indexStatus, setIndexStatus] = useState({ loading: false, error: null, data: null });
       const [error, setError] = useState(null);
       const [tab, setTab] = useState('issues');
       const [openIssue, setOpenIssue] = useState(null);
@@ -1302,6 +1412,7 @@ window.__ModuleLoader__.load({
           setDeep(null);
           setCrux(null);
           setKeywords({ loading: false, error: null, data: null });
+          setIndexStatus({ loading: false, error: null, data: null });
           setSearch((s) => ({ ...s, result: null, error: null, status: '', code: '' }));
           setAdvice({ loading: false, text: '', error: null });
           setTab('issues');
@@ -1319,6 +1430,7 @@ window.__ModuleLoader__.load({
             crux: null,
             search: null,
             keywords: null,
+            index: null,
           });
         } catch (err) {
           setError(err.message || String(err));
@@ -1350,6 +1462,7 @@ window.__ModuleLoader__.load({
           setDeep(null);
           setCrux(null);
           setKeywords({ loading: false, error: null, data: null });
+          setIndexStatus({ loading: false, error: null, data: null });
           setSearch((s) => ({ ...s, result: null, error: null, status: '', code: '' }));
           setAdvice({ loading: false, text: '', error: null });
           setTab('issues');
@@ -1368,6 +1481,7 @@ window.__ModuleLoader__.load({
             crux: null,
             search: null,
             keywords: null,
+            index: null,
           });
         } catch (err) {
           setError(err.message || String(err));
@@ -1585,6 +1699,54 @@ window.__ModuleLoader__.load({
         }
       }
 
+      async function runIndexStatus() {
+        const raw = String(report ? report.url : searchUrl || input || '').trim();
+        const { url, error: urlError } = normalizeUrl(raw);
+        if (urlError) {
+          setIndexStatus({ loading: false, error: urlError, data: null });
+          return;
+        }
+        const token = gscToken || {};
+        if (!token.accessToken && !token.refreshToken) {
+          setIndexStatus({ loading: false, error: '需要先完成 Google 授权（点「搜索数据」里的「获取授权链接」）。', data: null });
+          return;
+        }
+        const clientId = String(settings.gscClientId || '').trim();
+        const clientSecret = String(settings.gscClientSecret || '').trim();
+        const sampleUrls = [];
+        if (report && report.mode === 'site' && Array.isArray(report.pages)) {
+          for (const row of report.pages.slice(0, 25)) {
+            if (row.url && !row.failed) sampleUrls.push(row.url);
+          }
+        } else if (report && report.sitemap && Array.isArray(report.sitemap.urls)) {
+          sampleUrls.push(...report.sitemap.urls.slice(0, 25));
+        }
+        if (!sampleUrls.length) sampleUrls.push(url);
+        setIndexStatus({ loading: true, error: null, data: null });
+        try {
+          const [sm, ins] = await Promise.all([
+            postJson('/seo-workbench/api/gsc/sitemaps', { url, clientId, clientSecret, accessToken: token.accessToken, refreshToken: token.refreshToken, expiresAt: token.expiresAt }),
+            postJson('/seo-workbench/api/gsc/inspect', { url, urls: sampleUrls, clientId, clientSecret, accessToken: token.accessToken, refreshToken: token.refreshToken, expiresAt: token.expiresAt, limit: 25 }),
+          ]);
+          if (sm.refreshed) {
+            const next = { accessToken: sm.refreshed.accessToken, refreshToken: sm.refreshed.refreshToken || token.refreshToken, expiresAt: sm.refreshed.expiresAt };
+            setGscToken(next);
+            lsSet(LS_GSC, next);
+          }
+          const firstErr = [sm, ins].find((r) => r.status !== 'ok');
+          if (firstErr) {
+            setIndexStatus({ loading: false, error: mapSearchError(firstErr.error), data: null });
+            return;
+          }
+          const data = { siteUrl: sm.siteUrl || ins.siteUrl, sitemaps: sm.sitemaps || [], results: ins.results || [] };
+          setIndexStatus({ loading: false, error: null, data });
+          const entryId = reportEntryId(report);
+          if (entryId) patchHistory(entryId, { index: data });
+        } catch (err) {
+          setIndexStatus({ loading: false, error: err.message || String(err), data: null });
+        }
+      }
+
       async function runKeywords() {
         if (!report) return;
         setKeywords({ loading: true, error: null, data: null });
@@ -1629,6 +1791,7 @@ window.__ModuleLoader__.load({
           status: '',
         });
         setSearchUrl(entry.url);
+        setIndexStatus({ loading: false, error: null, data: entry.index || null });
         setAdvice({ loading: false, text: (entry.advice && entry.advice.text) || '', error: null });
         setTab('issues');
         setOpenIssue(null);
@@ -1637,11 +1800,11 @@ window.__ModuleLoader__.load({
       }
       function exportMd() {
         if (!report) return;
-        downloadText(`seo-report-${domainOf(report.url)}-${new Date().toISOString().slice(0, 10)}.md`, buildMarkdown(report, deep, advice.text, cruxOk, searchOk, keywordsOk));
+        downloadText(`seo-report-${domainOf(report.url)}-${new Date().toISOString().slice(0, 10)}.md`, buildMarkdown(report, deep, advice.text, cruxOk, searchOk, keywordsOk, indexStatus && indexStatus.data ? { data: indexStatus.data } : null));
       }
       function copyMd() {
         if (!report) return;
-        copyText(buildMarkdown(report, deep, advice.text, cruxOk, searchOk, keywordsOk));
+        copyText(buildMarkdown(report, deep, advice.text, cruxOk, searchOk, keywordsOk, indexStatus && indexStatus.data ? { data: indexStatus.data } : null));
         setCopied('md');
         setTimeout(() => setCopied(null), 1500);
       }
@@ -1909,6 +2072,9 @@ window.__ModuleLoader__.load({
                           entry.keywords && entry.keywords.status === 'ok'
                             ? h('span', { className: 'seo-wb-history-badge seo-wb-badge-keywords', title: '已保存关键词分析' }, '关键词')
                             : null,
+                          entry.index
+                            ? h('span', { className: 'seo-wb-history-badge seo-wb-badge-index', title: '已保存索引状态（GSC）' }, '索引')
+                            : null,
                         ),
                         entry.score !== undefined && entry.score !== null
                           ? h('span', { className: `seo-wb-score-chip seo-wb-score-chip-${scoreColor(entry.score)}` }, String(Math.round(entry.score)))
@@ -1939,6 +2105,10 @@ window.__ModuleLoader__.load({
           onAuth: requestGscAuth,
           onExchange: finishGscAuth,
           onSearch: runSearchData,
+        }),
+        h(IndexStatusPanel, {
+          status: indexStatus,
+          onRun: runIndexStatus,
         }),
       );
     }
@@ -2058,6 +2228,8 @@ window.__ModuleLoader__.load({
 .seo-wb-empty { margin-top: 12px; padding: 18px; border: 1px dashed var(--dsw-alias-border-l1); border-radius: 10px; color: var(--dsw-alias-label-secondary); font-size: 13px; text-align: center; }
 .seo-wb-empty-hero { padding: 32px 18px; font-size: 14px; }
 .seo-wb-history-panel { margin-top: 24px; }
+.seo-wb-search-panel + .seo-wb-search-panel { margin-top: 14px; }
+.seo-wb-badge-index { color: var(--dsw-alias-state-warn-primary); background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 12%, transparent); }
 .seo-wb-panel { background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l1); border-radius: 12px; padding: 12px 14px; min-width: 0; }
 .seo-wb-panel-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
 .seo-wb-collapse { margin-left: auto; }

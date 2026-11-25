@@ -15,8 +15,9 @@ import { crawlSite } from '../lib/crawl.js';
 import { buildSiteReport } from '../lib/site.js';
 import { runCrux } from '../lib/crux.js';
 import { runBingSearch } from '../lib/bing.js';
-import { buildAuthUrl } from '../lib/gsc.js';
+import { buildAuthUrl, listSitemaps, inspectUrls } from '../lib/gsc.js';
 import { analyzeKeywords, joinSearchData } from '../lib/keywords.js';
+import { validateHreflangs } from '../lib/hreflang.js';
 
 const PAGE = `<!doctype html>
 <html>
@@ -99,6 +100,9 @@ const SITE_HOME = `<!doctype html>
   <meta charset="utf-8">
   <title>站点首页（测试站点体检模式的入口页面，标题长度在正常范围内）</title>
   <meta name="description" content="站点首页的描述文字，长度适中也完整清晰，用于站点体检的入口页检查">
+  <link rel="alternate" hreflang="zh" href="/">
+  <link rel="alternate" hreflang="en" href="/en">
+  <link rel="alternate" hreflang="x-default" href="/">
 </head>
 <body>
   <h1>站点首页</h1>
@@ -320,6 +324,48 @@ try {
     gscUrl.status === 'ok' && gscUrl.url.includes('accounts.google.com') && gscUrl.url.includes('webmasters.readonly'),
     `GSC 授权链接应包含 accounts.google.com 与只读 scope，实际 ${JSON.stringify(gscUrl)}`,
   );
+
+  // ---- hreflang deep validation (pure unit tests + site fixture).
+  {
+    const a = 'https://example.com';
+    const good = validateHreflangs([
+      { url: `${a}/a`, finalUrl: `${a}/a`, status: 200, canonical: `${a}/a`, noindex: false,
+        hreflangs: [{ hreflang: 'en', href: `${a}/a` }, { hreflang: 'zh', href: `${a}/zh` }, { hreflang: 'x-default', href: `${a}/a` }] },
+      { url: `${a}/zh`, finalUrl: `${a}/zh`, status: 200, canonical: `${a}/zh`, noindex: false,
+        hreflangs: [{ hreflang: 'en', href: `${a}/a` }, { hreflang: 'zh', href: `${a}/zh` }, { hreflang: 'x-default', href: `${a}/a` }] },
+    ]);
+    assert(good.annotated === 2 && good.issues.length === 0, `互链+自引用+x-default 齐全应无问题，实际 ${JSON.stringify(good.issues)}`);
+    const bad = validateHreflangs([
+      { url: `${a}/bad`, finalUrl: `${a}/bad`, status: 200, noindex: false,
+        hreflangs: [{ hreflang: 'en-UK', href: `${a}/en` }, { hreflang: 'zh', href: `${a}/zh2` }] },
+    ]);
+    assert(bad.issues.some((i) => i.id === 'hreflang-invalid-code'), 'en-UK 应报非法地区码');
+    assert(bad.issues.some((i) => i.id === 'hreflang-no-self-reference'), '缺自引用应报错');
+    assert(bad.issues.some((i) => i.id === 'hreflang-missing-x-default'), '缺 x-default 应报错');
+    const broken = validateHreflangs([
+      { url: `${a}/t1`, finalUrl: `${a}/t1`, status: 200, noindex: false,
+        hreflangs: [{ hreflang: 'en', href: `${a}/t1` }, { hreflang: 'zh', href: `${a}/t2` }] },
+      { url: `${a}/t2`, finalUrl: `${a}/t2`, status: 404, noindex: false,
+        hreflangs: [{ hreflang: 'en', href: `${a}/t1` }, { hreflang: 'zh', href: `${a}/t2` }] },
+    ]);
+    assert(broken.issues.some((i) => i.id === 'hreflang-target-broken'), '目标 404 应报不可索引');
+  }
+  {
+    const hf = await crawlSite(`${base}/`, { maxPages: 20, maxDepth: 3, deadLinkSample: 20 });
+    const hfReport = buildSiteReport(hf);
+    assert(hfReport.hreflang && hfReport.hreflang.annotated >= 1, '站点抓取应发现 hreflang 声明（/ 首页）');
+    assert(hfReport.groups.find((g) => g.id === 'indexability').checks.some((c) => c.id === 'hreflang'), 'indexability 组应含 hreflang 检查');
+  }
+
+  // ---- GSC coverage: no token → no-token (offline, no network).
+  {
+    const noTokSm = await listSitemaps({ rawUrl: 'https://example.com/' });
+    assert(noTokSm.status === 'error' && noTokSm.error.code === 'no-token', `listSitemaps 无令牌应返回 no-token，实际 ${JSON.stringify(noTokSm)}`);
+    const noTokIn = await inspectUrls({ rawUrl: 'https://example.com/', urls: ['https://example.com/'] });
+    assert(noTokIn.status === 'error' && noTokIn.error.code === 'no-token', `inspectUrls 无令牌应返回 no-token，实际 ${JSON.stringify(noTokIn)}`);
+    const badUrl = await inspectUrls({ rawUrl: 'ftp://x', urls: ['https://example.com/'] });
+    assert(badUrl.status === 'error' && badUrl.error.code === 'bad-url', `inspectUrls 非法网址应返回 bad-url，实际 ${JSON.stringify(badUrl)}`);
+  }
 
   // ---- robots Crawl-delay parsing.
   const robotsCd = parseRobots('User-agent: *\nCrawl-delay: 2\nSitemap: https://example.com/sitemap.xml\n');

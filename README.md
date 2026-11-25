@@ -69,6 +69,17 @@ A DeepSeek Harness plugin that runs technical SEO audits of websites from a dedi
      site URL and 查询 → totals, Top 查询词 and Top 页面 for the last 28 days.
    - **必应 Webmaster** (`POST /seo-workbench/api/bing`): needs a Bing API Key
      (bing.com/webmasters → API 访问), then 查询 returns the same totals/query/page tables.
+12. **索引状态（GSC Coverage）** — after any audit, the 索引状态 panel (`POST
+   /seo-workbench/api/gsc/sitemaps` + `/api/gsc/inspect`) reads the Search Console
+   sitemap submission status (已提交 vs 已索引, per sitemap) and samples up to 25 URLs
+   through the URL Inspection API (判定 / 覆盖状态 / 抓取状态). Needs the same GSC OAuth
+   as item 11; tokens are reused.
+13. **hreflang 深度校验** — every site crawl now validates hreflang declarations:
+   self-referencing entries, reciprocal pairs (A→B requires B→A), `x-default` presence,
+   valid ISO 639-1 + ISO 3166-1 codes (`en-GB`, never `en-UK`), duplicate language codes
+   pointing at different URLs, canonical-in-set agreement, and target reachability
+   (200 + indexable). Issues are reported in 可抓取与索引 with 涉及页面 details; the
+   single-page audit checks codes / x-default / self-reference too.
 
 ## Configuration
 
@@ -148,7 +159,7 @@ measured by a lab run; the card shows `—` locally. Chrome is launched with `--
 
 | File | Purpose |
 |---|---|
-| `index.js` | Host half: webServer routes (`/seo-workbench/api/audit`, `/deep`, `/models`, `/advice`, `/site-audit`, `/crux`, `/bing`, `/gsc/auth-url`, `/gsc/token`, `/gsc/sites`, `/gsc/search`) |
+| `index.js` | Host half: webServer routes (`/seo-workbench/api/audit`, `/deep`, `/models`, `/advice`, `/site-audit`, `/crux`, `/bing`, `/gsc/auth-url`, `/gsc/token`, `/gsc/sites`, `/gsc/search`, `/gsc/sitemaps`, `/gsc/inspect`) |
 | `lib/engine.js` | `runAudit()` orchestration |
 | `lib/fetch.js` | HTTP fetch w/ redirect chain, timeout, size cap |
 | `lib/parse.js` | Dependency-free HTML / robots.txt / sitemap parsing |
@@ -160,7 +171,8 @@ measured by a lab run; the card shows `—` locally. Chrome is launched with `--
 | `lib/localdeep.js` | Local Chrome (CDP) CWV measurement for the deep check |
 | `lib/crux.js` | Chrome UX Report field CWV (p75, 28 days) |
 | `lib/bing.js` | Bing Webmaster search data (clicks/impressions/rank) |
-| `lib/gsc.js` | Google Search Console OAuth + searchAnalytics (queries/pages) |
+| `lib/gsc.js` | Google Search Console OAuth + searchAnalytics (queries/pages) + sitemaps / URL Inspection coverage |
+| `lib/hreflang.js` | hreflang deep validation (self-reference / reciprocal / x-default / codes / canonical agreement) |
 | `lib/psi.js` | PageSpeed Insights deep check (fallback when Chrome is unavailable) |
 | `client.js` | Client half: left-sidebar row + `main` panel UI |
 | `locale/*.json` | Bundle metadata (`meta.title`, `meta.description`, `meta.detail`) |
