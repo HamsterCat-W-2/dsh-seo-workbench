@@ -11,8 +11,11 @@ A DeepSeek Harness plugin that runs technical SEO audits of websites from a dedi
 ## Usage
 
 1. Click **SEO 分析** in the left navigation sidebar to open the workbench page.
-2. Enter a URL (scheme is optional, `https://` is assumed) and click **分析**. While it runs,
-   the analysis pipeline is shown as a step flow (fetch → parse → robots/sitemap → checks → score).
+2. Pick a mode above the input: **单页分析** (quick health check of one URL) or **站点体检**
+   (crawl the site and aggregate cross-page findings). Enter a URL (scheme is optional,
+   `https://` is assumed) and click **分析 / 站点体检**. While it runs, the analysis pipeline
+   is shown as a step flow (fetch → parse → robots/sitemap → checks → score; site mode:
+   robots/sitemap → crawl links → fetch pages → dead links → aggregate).
 3. The workbench shows a 0–100 weighted total score, four group scores, a prioritized issue list
    (severity + impact → evidence → fix), the per-check detail, and a page overview.
 4. **导出 .md** downloads a full Markdown report; **复制** copies it to the clipboard.
@@ -25,12 +28,18 @@ A DeepSeek Harness plugin that runs technical SEO audits of websites from a dedi
 6. **AI 建议** sends the report to the model selected in the top bar and returns a prioritized
    fix plan. The model dropdown is fed by the Host's live provider/model catalog
    (`/seo-workbench/api/models`).
-7. **分析历史** keeps the last 20 audits (localStorage); click a row to restore its report,
+7. **站点体检** (`POST /seo-workbench/api/site-audit`) BFS-crawls the site: seeds from
+   `robots.txt` Sitemap lines (or `/sitemap.xml`) plus the homepage's internal links, stays on
+   the same host, respects `Disallow`, and is bounded by the page cap. It reports a 站点概览
+   (pages fetched/failed/skipped, dead links, sitemap size), a per-page table with flags
+   (thin content, missing title/description/H1/canonical, duplicate title/description, orphan,
+   failed), and a 4-group site score (可索引性 / On-Page / 内容质量 / 站点结构).
+8. **分析历史** keeps the last 20 audits (localStorage); click a row to restore its report,
    delete a single row, or clear all. 深度检测 and AI 建议 results are saved into the same
-   entry — badges `深度` / `AI` mark which ones the entry already has.
-8. **⚙ 设置** configures a default site (prefills the input), a PageSpeed API Key, the fetch
-   timeout, and the max redirect count. Settings persist in localStorage and override the row
-   `config` per request.
+   entry — badges `深度` / `AI` / `站点` mark which ones the entry already has.
+9. **⚙ 设置** configures a default site (prefills the input), a PageSpeed API Key, the fetch
+   timeout, the max redirect count, and the 站点体检 page cap (maxPages). Settings persist in
+   localStorage and override the row `config` per request.
 
 ## Configuration
 
@@ -50,6 +59,7 @@ row `config` object — add a `config:` block to the patch row in the profile's
         userAgent: ''           # empty = built-in Chrome-like UA
         psiKey: ''              # PageSpeed Insights key (only used when local Chrome is unavailable)
         chromePath: ''          # optional override for the Chrome binary path (or env SEO_WB_CHROME_PATH)
+        maxPages: 30            # 站点体检 page cap (2–200)
 ```
 
 The deep check (`lib/localdeep.js`) is a one-shot headless Chrome run, so it measures a lab
@@ -76,6 +86,7 @@ measured by a lab run; the card shows `—` locally. Chrome is launched with `--
 6. Formal install verification — done (live audit + deep routes verified)
 7. Left-sidebar entry (`sidebar.panellist` row + `main` panel) — done
 8. UI redesign: top bar (model select + settings), input + analyze, history, pipeline progress, AI 建议 — done (Host restart needed for the new `/models` + `/advice` routes)
+9. 站点体检 crawl mode (BFS crawler + cross-page aggregation + site UI) — done (Host restart needed for the `/site-audit` route)
 
 ## Notes & limitations
 
@@ -85,8 +96,10 @@ measured by a lab run; the card shows `—` locally. Chrome is launched with `--
 - The deep check is a local Chrome lab measurement (LCP/CLS/TTFB/FCP + TBT, mobile viewport);
   INP needs real user interaction and shows `—`. Google PageSpeed Insights is only used as a
   fallback when Chrome is unavailable.
-- Single-page analysis; cross-page duplicate titles/descriptions and site-wide crawling are
-  roadmap items (Phase 2).
+- 站点体检 is bounded (default 30 pages, configurable up to 200), respects `robots.txt`
+  `Disallow`, and only follows same-host internal links. Heuristic cross-page thresholds
+  (e.g. thin content < 300 words) are not calibrated per site type; dead-link sampling and
+  orphan detection are best-effort over the crawled subset.
 - Replacing an installed bundle under the same package name requires restarting DSH so the
   fresh Host/Client modules load.
 
@@ -94,12 +107,14 @@ measured by a lab run; the card shows `—` locally. Chrome is launched with `--
 
 | File | Purpose |
 |---|---|
-| `index.js` | Host half: webServer routes (`/seo-workbench/api/audit`, `/deep`, `/models`, `/advice`) |
+| `index.js` | Host half: webServer routes (`/seo-workbench/api/audit`, `/deep`, `/models`, `/advice`, `/site-audit`) |
 | `lib/engine.js` | `runAudit()` orchestration |
 | `lib/fetch.js` | HTTP fetch w/ redirect chain, timeout, size cap |
 | `lib/parse.js` | Dependency-free HTML / robots.txt / sitemap parsing |
 | `lib/checks.js` | The 21 checks + group weights |
 | `lib/score.js` | Weighted scoring |
+| `lib/crawl.js` | 站点体检 BFS crawler (robots-respecting, same-host, bounded) |
+| `lib/site.js` | Cross-page aggregation → site report |
 | `lib/localdeep.js` | Local Chrome (CDP) CWV measurement for the deep check |
 | `lib/psi.js` | PageSpeed Insights deep check (fallback when Chrome is unavailable) |
 | `client.js` | Client half: left-sidebar row + `main` panel UI |

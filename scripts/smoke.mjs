@@ -11,6 +11,8 @@
 import http from 'node:http';
 import { runAudit } from '../lib/engine.js';
 import { hasMixedContent } from '../lib/parse.js';
+import { crawlSite } from '../lib/crawl.js';
+import { buildSiteReport } from '../lib/site.js';
 
 const PAGE = `<!doctype html>
 <html>
@@ -55,19 +57,71 @@ const NOINDEX_PAGE = `<!doctype html>
 <body><h1>标题</h1><p>${'文'.repeat(340)}</p></body>
 </html>`;
 
+// ---- site fixture: home links to dup-a/dup-b (same title+desc), thin,
+// ---- orphan (sitemap-only), dead-404, and the robots-disallowed /admin.
+const SITE_DUP = `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>重复标题页面（完全相同的标题用于验证跨页重复检测是否按预期工作）</title>
+  <meta name="description" content="重复描述内容完全相同的一段描述文字用于验证描述重复检测">
+</head>
+<body><h1>重复页标题</h1><p>${'文'.repeat(120)}</p><a href="/site/">首页</a></body>
+</html>`;
+
+const SITE_THIN = `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>薄内容测试页面</title>
+  <meta name="description" content="薄内容描述">
+</head>
+<body><h1>薄内容</h1><p>只有很少的正文。</p><a href="/site/">首页</a></body>
+</html>`;
+
+const SITE_ORPHAN = `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>孤儿页测试页面（仅 sitemap 可达，无站内入链）</title>
+  <meta name="description" content="孤儿页描述">
+</head>
+<body><h1>孤儿页</h1><p>${'文'.repeat(150)}</p></body>
+</html>`;
+
+const SITE_HOME = `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>站点首页（测试站点体检模式的入口页面，标题长度在正常范围内）</title>
+  <meta name="description" content="站点首页的描述文字，长度适中也完整清晰，用于站点体检的入口页检查">
+</head>
+<body>
+  <h1>站点首页</h1>
+  <p>${'文'.repeat(180)}</p>
+  <a href="/dup-a">重复页 A</a>
+  <a href="/dup-b">重复页 B</a>
+  <a href="/thin">薄内容页</a>
+  <a href="/dead-404">死链</a>
+  <a href="/admin">管理后台</a>
+</body>
+</html>`;
+
 const server = http.createServer((req, res) => {
   const url = req.url || '/';
   if (url === '/robots.txt') {
+    const port = server.address().port;
     res.writeHead(200, { 'content-type': 'text/plain' });
     res.end(
-      `User-agent: *\nDisallow: /private\nSitemap: http://127.0.0.1:${server.address().port}/sitemap.xml\n`,
+      `User-agent: *\nDisallow: /private\nDisallow: /admin\nSitemap: http://127.0.0.1:${port}/sitemap.xml\n`,
     );
     return;
   }
   if (url === '/sitemap.xml') {
+    const port = server.address().port;
     res.writeHead(200, { 'content-type': 'application/xml' });
     res.end(
-      '<?xml version="1.0"?><urlset><url><loc>http://127.0.0.1:1/</loc></url><url><loc>http://127.0.0.1:1/b</loc></url></urlset>',
+      `<?xml version="1.0"?><urlset><url><loc>http://127.0.0.1:${port}/</loc></url><url><loc>http://127.0.0.1:${port}/dup-a</loc></url><url><loc>http://127.0.0.1:${port}/dup-b</loc></url><url><loc>http://127.0.0.1:${port}/thin</loc></url><url><loc>http://127.0.0.1:${port}/orphan</loc></url></urlset>`,
     );
     return;
   }
@@ -85,6 +139,36 @@ const server = http.createServer((req, res) => {
   if (url === '/noindex') {
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     res.end(NOINDEX_PAGE);
+    return;
+  }
+  if (url === '/site/' || url === '/site') {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end(SITE_HOME);
+    return;
+  }
+  if (url === '/dup-a' || url === '/dup-b') {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end(SITE_DUP);
+    return;
+  }
+  if (url === '/thin') {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end(SITE_THIN);
+    return;
+  }
+  if (url === '/orphan') {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end(SITE_ORPHAN);
+    return;
+  }
+  if (url === '/admin') {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end('<!doctype html><html><head><title>管理后台</title></head><body><h1>后台</h1></body></html>');
+    return;
+  }
+  if (url === '/dead-404') {
+    res.writeHead(404, { 'content-type': 'text/html; charset=utf-8' });
+    res.end('<!doctype html><html><head><title>404</title></head><body>Not Found</body></html>');
     return;
   }
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
@@ -106,7 +190,7 @@ try {
   assert(report.groups.length === 4, `应返回 4 个分组，实际 ${report.groups.length}`);
   assert(typeof report.score.total === 'number', 'score.total 应为数字');
   assert(report.robots.status === 200 && !report.robots.disallowAll, 'robots.txt 应可访问且未禁止全站');
-  assert(report.sitemap.urls === 2, `sitemap 应有 2 个 URL，实际 ${report.sitemap.urls}`);
+  assert(report.sitemap.urls === 5, `sitemap 应有 5 个 URL，实际 ${report.sitemap.urls}`);
   assert(report.page.h1s.length === 2, '应检测到 2 个 H1');
   assert(report.page.imagesNoAlt === 1, '应检测到 1 张缺失 alt 的图片');
   assert(report.page.internalLinks >= 1 && report.page.externalLinks === 1, '内链/外链计数不对');
@@ -151,6 +235,37 @@ try {
   assert(hasMixedContent('<img src="http://x/a.png">') === true, 'img src=http 是混合内容');
   assert(hasMixedContent('<script src="http://x/a.js"></script>') === true, 'script src=http 是混合内容');
   assert(hasMixedContent('<link rel="stylesheet" href="http://x/a.css">') === true, 'stylesheet href=http 是混合内容');
+
+  // ---- site crawl mode: cross-page aggregation report.
+  const crawl = await crawlSite(`${base}/site/`, { maxPages: 30, maxDepth: 3, concurrency: 4, fetchTimeoutMs: 5000 });
+  assert(crawl.status === 'ok', `站点抓取应为 ok，实际 ${crawl.status}: ${JSON.stringify(crawl.error)}`);
+  assert(crawl.stats.pages >= 4, `站点应抓取 >= 4 页，实际 ${crawl.stats.pages}`);
+  assert(crawl.stats.skippedDisallowed >= 1, '应跳过 robots 禁止的 /admin，实际 skippedDisallowed 为 ' + crawl.stats.skippedDisallowed);
+  assert(crawl.robots.sitemaps.length === 1, 'robots.txt 的 Sitemap 行应被识别');
+  assert(crawl.sitemap.urls.length === 5, `站点 sitemap 应有 5 个 URL，实际 ${crawl.sitemap.urls.length}`);
+
+  const site = buildSiteReport(crawl);
+  assert(site.status === 'ok' && site.mode === 'site', 'site 报告应 status ok / mode site');
+  assert(typeof site.score.total === 'number', 'site score.total 应为数字');
+  assert(site.groups.length === 4, `site 报告应有 4 个分组，实际 ${site.groups.length}`);
+  const deadLinkIssue = site.issues.find((i) => i.id === 'dead-links');
+  assert(deadLinkIssue && deadLinkIssue.pages.length >= 1, '站点体检 dead-links 问题应携带 >= 1 个页面');
+
+  const siteIssueIds = site.issues.map((i) => i.id);
+  for (const expected of ['duplicate-title', 'duplicate-description', 'thin-content', 'orphan-pages', 'dead-links']) {
+    assert(siteIssueIds.includes(expected), `站点体检 issues 应包含 ${expected}，实际 ${siteIssueIds.join(',')}`);
+  }
+  assert(site.issues.every((i) => i.pages && i.pages.length >= 0), 'site 问题应携带 pages 明细');
+  const orphanRows = site.pages.filter((p) => p.orphan);
+  assert(orphanRows.length >= 1, '应标记出孤儿页');
+  assert(orphanRows.some((p) => p.url.includes('/orphan')), `孤儿页应包含 /orphan，实际 ${orphanRows.map((p) => p.url).join(',')}`);
+  const dupRows = site.pages.filter((p) => p.dupTitle);
+  assert(dupRows.length >= 2, `应标记 >= 2 个重复标题页，实际 ${dupRows.length}`);
+  assert(dupRows.some((p) => p.url.includes('/dup-a')) && dupRows.some((p) => p.url.includes('/dup-b')), `重复标题页应包含 /dup-a 与 /dup-b，实际 ${dupRows.map((p) => p.url).join(',')}`);
+  const thinRow = site.pages.find((p) => p.thin && p.url.includes('/thin'));
+  assert(thinRow, '应标记薄内容页 /thin');
+  const deadRow = site.pages.find((p) => p.failed && p.url.includes('/dead-404'));
+  assert(deadRow, '应标记死链页 /dead-404 为 failed');
 
   console.log('PASS smoke test');
   console.log(

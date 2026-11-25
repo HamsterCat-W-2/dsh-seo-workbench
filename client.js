@@ -16,12 +16,13 @@ window.__ModuleLoader__.load({
 
     const AUDIT_STAGES = ['抓取页面', '解析 HTML', '抓取 robots / sitemap', '运行检查', '计算得分'];
     const DEEP_STAGES = ['启动本地 Chrome', '渲染页面', '采集 CWV 指标'];
+    const SITE_STAGES = ['抓取 robots / sitemap', '遍历站内链接', '抓取页面', '检测死链', '跨页聚合评分'];
     const SEVERITY_LABELS = { critical: '严重', high: '高', medium: '中', low: '低' };
     const LS_SETTINGS = 'seo-wb-settings';
     const LS_HISTORY = 'seo-wb-history';
     const LS_MODEL = 'seo-wb-model';
 
-    const DEFAULT_SETTINGS = { defaultSite: '', psiKey: '', timeoutMs: 15000, maxRedirects: 5 };
+    const DEFAULT_SETTINGS = { defaultSite: '', psiKey: '', timeoutMs: 15000, maxRedirects: 5, maxPages: 30 };
 
     function lsGet(key, fallback) {
       try {
@@ -175,9 +176,9 @@ window.__ModuleLoader__.load({
 
     function buildMarkdown(report, deep, adviceText) {
       const L = [];
-      L.push(`# SEO 分析报告 — ${report.url}`);
+      L.push(report.mode === 'site' ? `# SEO 站点体检报告 — ${domainOf(report.url)}` : `# SEO 分析报告 — ${report.url}`);
       L.push('');
-      L.push(`> 最终地址：${report.finalUrl}　|　抓取耗时：${Math.round(report.durationMs)}ms　|　生成时间：${report.fetchedAt}`);
+      L.push(`> 最终地址：${report.finalUrl}　|　耗时：${Math.round(report.durationMs)}ms　|　生成时间：${report.fetchedAt}`);
       L.push('');
       L.push(`## 总分：${report.score.total}/100`);
       L.push('');
@@ -209,19 +210,47 @@ window.__ModuleLoader__.load({
         L.push('');
       }
       const p = report.page;
-      L.push('## 页面概况');
-      L.push('');
-      L.push(`- HTTP 状态：${p.httpStatus}（重定向链 ${(p.redirectChain || []).length} 跳）`);
-      L.push(`- 页面大小：${fmtBytes(p.bytes)}　|　内容类型：${p.contentType || '-'}`);
-      L.push(`- 标题：${p.title ? `“${p.title}”（${[...(p.title || '')].length} 字符）` : '无'}`);
-      L.push(`- 描述：${p.description ? `${[...(p.description || '')].length} 字符` : '无'}`);
-      L.push(`- H1：${p.h1s.length} 个；H2：${p.h2s} 个；H3：${p.h3s} 个`);
-      L.push(`- 图片：${p.imageCount} 张（${p.imagesNoAlt} 张缺 alt；lazy ${p.lazyCount} 张）`);
-      L.push(`- 内链 ${p.internalLinks} / 外链 ${p.externalLinks} / nofollow ${p.nofollowLinks}`);
-      L.push(`- 正文字数：${p.words ? p.words.total : '-'}（中文 ${p.words ? p.words.cjk : '-'} / 英文 ${p.words ? p.words.latin : '-'}）`);
-      if (p.canonical) L.push(`- canonical：${p.canonical}`);
-      if (p.jsonldTypes && p.jsonldTypes.length) L.push(`- JSON-LD：${p.jsonldTypes.join('、')}`);
-      L.push('');
+      if (report.mode === 'site') {
+        L.push('## 站点概况');
+        L.push('');
+        const st = report.stats || {};
+        L.push(`- 抓取页面：${st.pages ?? (report.pages || []).length} 页（成功 ${st.ok ?? '-'} / 失败 ${st.failed ?? '-'} / 被 robots 跳过 ${st.skippedDisallowed ?? '-'}）`);
+        L.push(`- sitemap：${(report.sitemap && report.sitemap.urls && report.sitemap.urls.length) || 0} 个 URL　|　死链：${st.deadLinksFound ?? 0} 个　|　深度上限：${st.maxDepth ?? '-'}`);
+        L.push(`- robots.txt：${report.robots && report.robots.status ? report.robots.status : '?'}${report.robots && report.robots.disallowAll ? '（整站禁止抓取）' : ''}`);
+        L.push('');
+        L.push('| 页面 | 状态 | 深度 | 字数 | 入链 | 标记 |');
+        L.push('| --- | --- | --- | --- | --- | --- |');
+        const flags = (row) => {
+          const out = [];
+          if (row.failed) out.push('抓取失败');
+          if (row.noindex) out.push('noindex');
+          if (row.thin) out.push('薄');
+          if (row.dupTitle) out.push('重复标题');
+          if (row.dupDesc) out.push('重复描述');
+          if (row.orphan) out.push('孤儿');
+          if (row.missingH1) out.push('缺H1');
+          if (row.missingCanonical) out.push('缺canonical');
+          return out.join('、') || '-';
+        };
+        for (const row of report.pages || []) {
+          L.push(`| ${row.url} | ${row.httpStatus || row.error || '-'} | ${row.depth ?? '-'} | ${row.words ?? '-'} | ${row.inlinks ?? '-'} | ${flags(row)} |`);
+        }
+        L.push('');
+      } else {
+        L.push('## 页面概况');
+        L.push('');
+        L.push(`- HTTP 状态：${p.httpStatus}（重定向链 ${(p.redirectChain || []).length} 跳）`);
+        L.push(`- 页面大小：${fmtBytes(p.bytes)}　|　内容类型：${p.contentType || '-'}`);
+        L.push(`- 标题：${p.title ? `“${p.title}”（${[...(p.title || '')].length} 字符）` : '无'}`);
+        L.push(`- 描述：${p.description ? `${[...(p.description || '')].length} 字符` : '无'}`);
+        L.push(`- H1：${p.h1s.length} 个；H2：${p.h2s} 个；H3：${p.h3s} 个`);
+        L.push(`- 图片：${p.imageCount} 张（${p.imagesNoAlt} 张缺 alt；lazy ${p.lazyCount} 张）`);
+        L.push(`- 内链 ${p.internalLinks} / 外链 ${p.externalLinks} / nofollow ${p.nofollowLinks}`);
+        L.push(`- 正文字数：${p.words ? p.words.total : '-'}（中文 ${p.words ? p.words.cjk : '-'} / 英文 ${p.words ? p.words.latin : '-'}）`);
+        if (p.canonical) L.push(`- canonical：${p.canonical}`);
+        if (p.jsonldTypes && p.jsonldTypes.length) L.push(`- JSON-LD：${p.jsonldTypes.join('、')}`);
+        L.push('');
+      }
       if (deep && deep.status === 'ok') {
         L.push(deep.source === 'local-chrome' ? '## 深度检测（本地 Chrome 实测 Lab）' : '## 深度检测（PageSpeed Insights）');
         L.push('');
@@ -450,6 +479,80 @@ window.__ModuleLoader__.load({
       );
     }
 
+    function SiteOverviewSection({ report }) {
+      const st = report.stats || {};
+      const pages = report.pages || [];
+      const robots = report.robots || {};
+      const sitemap = report.sitemap || {};
+      const statCards = [
+        ['抓取页面', String(st.pages ?? pages.length)],
+        ['成功', String(st.ok ?? '-')],
+        ['失败', String(st.failed ?? '-')],
+        ['robots 跳过', String(st.skippedDisallowed ?? '-')],
+        ['死链', String(st.deadLinksFound ?? '-')],
+        ['sitemap URL', String((sitemap.urls || []).length)],
+      ];
+      const flagOf = (row) => {
+        const out = [];
+        if (row.noindex) out.push('noindex');
+        if (row.thin) out.push('薄');
+        if (row.dupTitle) out.push('重复标题');
+        if (row.dupDesc) out.push('重复描述');
+        if (row.orphan) out.push('孤儿');
+        if (row.missingH1) out.push('缺H1');
+        if (row.missingCanonical) out.push('缺canonical');
+        if (row.missingTitle) out.push('缺标题');
+        if (row.missingDesc) out.push('缺描述');
+        return out;
+      };
+      return h(
+        'div',
+        { className: 'seo-wb-site' },
+        h(
+          'div',
+          { className: 'seo-wb-stats' },
+          statCards.map(([k, v]) => h('div', { key: k, className: 'seo-wb-stat' }, h('div', { className: 'seo-wb-stat-label' }, k), h('div', { className: 'seo-wb-stat-value' }, v))),
+        ),
+        h(
+          'dl',
+          { className: 'seo-wb-overview' },
+          h('div', { className: 'seo-wb-kv' }, h('dt', null, 'robots.txt'), h('dd', { className: 'seo-wb-mono' }, robots.status ? `HTTP ${robots.status}${robots.disallowAll ? '（整站禁止抓取）' : ''}` : '未读取')),
+          h('div', { className: 'seo-wb-kv' }, h('dt', null, 'sitemap'), h('dd', { className: 'seo-wb-mono' }, sitemap.urls && sitemap.urls.length ? `${sitemap.urls.length} 个 URL（${(sitemap.fetchedFrom || []).join('、')}）` : '未发现')),
+          h('div', { className: 'seo-wb-kv' }, h('dt', null, '抓取深度'), h('dd', { className: 'seo-wb-mono' }, `上限 ${st.maxDepth ?? '-'} 层`)),
+          h('div', { className: 'seo-wb-kv' }, h('dt', null, '耗时'), h('dd', { className: 'seo-wb-mono' }, `${Math.round(report.durationMs || 0)}ms`)),
+        ),
+        pages.length
+          ? h(
+              'div',
+              { className: 'seo-wb-pages' },
+              h('div', { className: 'seo-wb-pages-head' }, '抓取到的页面'),
+              h(
+                'div',
+                { className: 'seo-wb-pages-rows' },
+                pages.map((row) =>
+                  h(
+                    'div',
+                    { key: row.url + row.depth, className: `seo-wb-page-row${row.failed ? ' seo-wb-page-failed' : ''}` },
+                    h('div', { className: 'seo-wb-page-main' },
+                      h('div', { className: 'seo-wb-page-url', title: row.url }, row.url),
+                      h('div', { className: 'seo-wb-page-meta' },
+                        h('span', { className: row.failed ? 'seo-wb-page-status seo-wb-page-bad' : 'seo-wb-page-status' }, row.failed ? (row.error || `HTTP ${row.httpStatus}`) : `HTTP ${row.httpStatus}`),
+                        h('span', null, `深度 ${row.depth}`),
+                        h('span', null, `${row.words} 字`),
+                        h('span', null, `${row.inlinks} 入链`),
+                      ),
+                      flagOf(row).length
+                        ? h('div', { className: 'seo-wb-page-flags' }, flagOf(row).map((f) => h('span', { key: f, className: 'seo-wb-chip' }, f)))
+                        : null,
+                    ),
+                  ),
+                ),
+              ),
+            )
+          : null,
+      );
+    }
+
     function cwvCard(label, value, ok, warn) {
       let state = 'ok';
       if (value === null || value === undefined) state = 'na';
@@ -565,6 +668,7 @@ window.__ModuleLoader__.load({
       ['psiKey', 'PageSpeed API Key', 'text', '可选；仅当本机没有 Chrome 时深度检测才回退到 PageSpeed', 'AIza…'],
       ['timeoutMs', '抓取超时（毫秒）', 'text', '默认 15000', '15000'],
       ['maxRedirects', '最大重定向数', 'text', '默认 5', '5'],
+      ['maxPages', '站点体检最大页数', 'text', '单次抓取上限，默认 30（2–200）', '30'],
     ];
 
     function SettingsPanel({ open, saved, onClose, onSave }) {
@@ -617,6 +721,7 @@ window.__ModuleLoader__.load({
 
     function SeoWorkbenchBody() {
       const [input, setInput] = useState('');
+      const [mode, setMode] = useState('page'); // 'page' | 'site'
       const [busy, setBusy] = useState(null);
       const [progress, setProgress] = useState(null);
       const [report, setReport] = useState(null);
@@ -671,7 +776,8 @@ window.__ModuleLoader__.load({
           setProgress(null);
           return undefined;
         }
-        setProgress({ stage: 0, stages: busy === 'audit' ? AUDIT_STAGES : DEEP_STAGES });
+        const stages = busy === 'site' ? SITE_STAGES : busy === 'audit' ? AUDIT_STAGES : DEEP_STAGES;
+        setProgress({ stage: 0, stages });
         const timer = setInterval(
           () => setProgress((p) => (p ? { ...p, stage: Math.min(p.stage + 1, p.stages.length - 1) } : p)),
           420,
@@ -727,6 +833,52 @@ window.__ModuleLoader__.load({
         } finally {
           setBusy(null);
         }
+      }
+
+      async function runSiteAudit() {
+        const { url, error: urlError } = normalizeUrl(input);
+        if (urlError) {
+          setError(urlError);
+          return;
+        }
+        setBusy('site');
+        setError(null);
+        try {
+          const data = await postJson('/seo-workbench/api/site-audit', {
+            url,
+            fetchTimeoutMs: Number(settings.timeoutMs) || 15000,
+            maxRedirects: Number(settings.maxRedirects) || 5,
+            maxPages: Number(settings.maxPages) || 30,
+          });
+          if (data.status === 'error') throw new Error((data.error && data.error.message) || '站点体检失败');
+          setReport(data);
+          setDeep(null);
+          setAdvice({ loading: false, text: '', error: null });
+          setTab('issues');
+          setOpenIssue(null);
+          setOpenGroup(null);
+          pushHistory({
+            id: `${data.fetchedAt}-${data.url}`,
+            url: data.url,
+            finalUrl: data.finalUrl,
+            fetchedAt: data.fetchedAt,
+            score: data.score && data.score.total,
+            mode: 'site',
+            report: data,
+            deep: null,
+            advice: null,
+          });
+        } catch (err) {
+          setError(err.message || String(err));
+        } finally {
+          setBusy(null);
+        }
+      }
+
+      function startAnalyze() {
+        if (busy) return;
+        if (mode === 'site') runSiteAudit();
+        else runAudit();
       }
 
       async function runDeep() {
@@ -788,6 +940,7 @@ window.__ModuleLoader__.load({
       }
       function openHistory(entry) {
         setInput(entry.url);
+        setMode(entry.mode || 'page');
         setReport(entry.report);
         setDeep(entry.deep || null);
         setAdvice({ loading: false, text: (entry.advice && entry.advice.text) || '', error: null });
@@ -820,7 +973,8 @@ window.__ModuleLoader__.load({
       }
 
       const issueCount = report && report.issues ? report.issues.length : 0;
-      const tabLabel = (id) => (id === 'issues' ? `问题（${issueCount}）` : id === 'details' ? '检查明细' : id === 'overview' ? '页面概况' : 'AI 建议');
+      const isSiteReport = report && report.mode === 'site';
+      const tabLabel = (id) => (id === 'issues' ? `问题（${issueCount}）` : id === 'details' ? '检查明细' : id === 'overview' ? (isSiteReport ? '站点概览' : '页面概况') : 'AI 建议');
 
       return h(
         'div',
@@ -871,6 +1025,28 @@ window.__ModuleLoader__.load({
 
         h(
           'div',
+          { className: 'seo-wb-mode', role: 'tablist', 'aria-label': '分析模式' },
+          [
+            ['page', '单页分析'],
+            ['site', '站点体检'],
+          ].map(([id, label]) =>
+            h(
+              'button',
+              {
+                key: id,
+                type: 'button',
+                role: 'tab',
+                'aria-selected': mode === id,
+                className: `seo-wb-mode-btn${mode === id ? ' seo-wb-mode-active' : ''}`,
+                onClick: () => setMode(id),
+              },
+              label,
+            ),
+          ),
+        ),
+
+        h(
+          'div',
           { className: 'seo-wb-analyze' },
           h('input', {
             className: 'seo-wb-input',
@@ -879,24 +1055,24 @@ window.__ModuleLoader__.load({
             onKeyDown: (e) => {
               if (e.key === 'Enter' && !(e.isComposing || (e.nativeEvent && e.nativeEvent.isComposing))) {
                 e.preventDefault();
-                if (!busy) runAudit();
+                startAnalyze();
               }
             },
-            placeholder: '输入域名，例如 example.com',
+            placeholder: mode === 'site' ? '输入站点域名，例如 example.com（会抓取站内页面）' : '输入域名，例如 example.com',
             maxLength: 2048,
             'aria-label': '要分析的网址',
             spellCheck: false,
           }),
           h(
             'button',
-            { type: 'button', className: 'seo-wb-btn seo-wb-btn-primary seo-wb-analyze-btn', onClick: runAudit, disabled: !!busy },
-            busy === 'audit' ? '分析中…' : '分析',
+            { type: 'button', className: 'seo-wb-btn seo-wb-btn-primary seo-wb-analyze-btn', onClick: startAnalyze, disabled: !!busy },
+            busy === 'audit' ? '分析中…' : busy === 'site' ? '体检中…' : mode === 'site' ? '站点体检' : '分析',
           ),
         ),
 
         h(Progress, { progress }),
         h(Spinner, {
-          label: busy === 'deep' ? '深度检测中…' : busy === 'advice' ? '正在生成 AI 建议…' : busy === 'audit' ? '分析中…' : null,
+          label: busy === 'deep' ? '深度检测中…' : busy === 'advice' ? '正在生成 AI 建议…' : busy === 'audit' ? '分析中…' : busy === 'site' ? '站点体检中…（最多抓取设置里的页数）' : null,
         }),
 
         error ? h('div', { className: 'seo-wb-error', role: 'alert' }, h('span', { className: 'seo-wb-error-mark' }, '!'), h('span', null, error)) : null,
@@ -916,20 +1092,22 @@ window.__ModuleLoader__.load({
                     'div',
                     { className: 'seo-wb-score-meta' },
                     h('div', { className: 'seo-wb-score-domain' }, domainOf(report.url)),
-                    h('div', { className: 'seo-wb-score-sub' }, `HTTP ${report.page ? report.page.httpStatus : '-'} · ${fmtTime(report.fetchedAt)} · ${Math.round(report.durationMs || 0)}ms`),
+                    h('div', { className: 'seo-wb-score-sub' }, isSiteReport ? `${(report.pages || []).length} 页 · ${fmtTime(report.fetchedAt)} · ${Math.round(report.durationMs || 0)}ms` : `HTTP ${report.page ? report.page.httpStatus : '-'} · ${fmtTime(report.fetchedAt)} · ${Math.round(report.durationMs || 0)}ms`),
                   ),
                 ),
                 h(GroupBars, { groups: report.groups }),
                 h(
                   'div',
                   { className: 'seo-wb-actions' },
-                  h('button', { type: 'button', className: 'seo-wb-btn', onClick: runDeep, disabled: !!busy }, '深度检测（CWV）'),
+                  isSiteReport
+                    ? null
+                    : h('button', { type: 'button', className: 'seo-wb-btn', onClick: runDeep, disabled: !!busy }, '深度检测（CWV）'),
                   h('button', { type: 'button', className: 'seo-wb-btn', onClick: runAdvice, disabled: !!busy || !modelSel }, 'AI 建议'),
                   h('button', { type: 'button', className: 'seo-wb-btn', onClick: exportMd }, '导出 .md'),
                   h('button', { type: 'button', className: 'seo-wb-btn', onClick: copyMd }, copied === 'md' ? '已复制 ✓' : '复制'),
                 ),
               ),
-              h(DeepSection, { deep }),
+              isSiteReport ? null : h(DeepSection, { deep }),
               h(
                 'div',
                 { className: 'seo-wb-tabs', role: 'tablist' },
@@ -953,7 +1131,7 @@ window.__ModuleLoader__.load({
                 : tab === 'details'
                   ? h(DetailsSection, { groups: report.groups, openGroup, setOpenGroup })
                   : tab === 'overview'
-                    ? h(OverviewSection, { report })
+                    ? (isSiteReport ? h(SiteOverviewSection, { report }) : h(OverviewSection, { report }))
                     : h(
                         'div',
                         { className: 'seo-wb-advice' },
@@ -984,7 +1162,7 @@ window.__ModuleLoader__.load({
                 : null,
             )
           : !busy
-            ? h('div', { className: 'seo-wb-empty seo-wb-empty-hero' }, '输入网址，点击「分析」，查看可抓取性、技术基础、On-Page 与内容质量评分')
+            ? h('div', { className: 'seo-wb-empty seo-wb-empty-hero' }, mode === 'site' ? '输入站点域名，点击「站点体检」：自动抓取站内页面，检查重复标题/描述、薄内容、孤儿页、死链，并给出整站评分' : '输入网址，点击「分析」，查看可抓取性、技术基础、On-Page 与内容质量评分')
             : null,
 
         h(
@@ -1021,6 +1199,9 @@ window.__ModuleLoader__.load({
                           { type: 'button', className: 'seo-wb-history-main', onClick: () => openHistory(entry) },
                           h('span', { className: 'seo-wb-history-domain' }, domainOf(entry.url)),
                           h('span', { className: 'seo-wb-history-time' }, fmtTime(entry.fetchedAt)),
+                          entry.mode === 'site'
+                            ? h('span', { className: 'seo-wb-history-badge seo-wb-badge-site', title: '站点体检报告' }, '站点')
+                            : null,
                           entry.deep && entry.deep.status === 'ok'
                             ? h('span', { className: 'seo-wb-history-badge seo-wb-badge-deep', title: '已保存深度检测（CWV）结果' }, '深度')
                             : null,
@@ -1189,6 +1370,29 @@ window.__ModuleLoader__.load({
 .seo-wb-field-hint { font-size: 11px; color: var(--dsw-alias-label-secondary); }
 .seo-wb-settings-actions { display: flex; gap: 8px; margin-top: 6px; }
 .seo-wb-settings-actions .seo-wb-btn-primary { margin-right: auto; }
+.seo-wb-mode { display: inline-flex; gap: 2px; margin-bottom: 10px; background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1); border-radius: 9px; padding: 2px; }
+.seo-wb-mode-btn { border: 0; background: none; font-family: inherit; font-size: 13px; color: var(--dsw-alias-label-secondary); padding: 5px 14px; border-radius: 7px; cursor: pointer; }
+.seo-wb-mode-btn:hover { color: var(--dsw-alias-label-primary); }
+.seo-wb-mode-active { background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+.seo-wb-mode-btn:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
+.seo-wb-site { display: flex; flex-direction: column; gap: 14px; margin-top: 12px; }
+.seo-wb-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(92px, 1fr)); gap: 8px; }
+.seo-wb-stat { border: 1px solid var(--dsw-alias-border-l1); border-radius: 10px; padding: 10px 12px; background: var(--dsw-alias-bg-layer-1); }
+.seo-wb-stat-label { font-size: 11px; color: var(--dsw-alias-label-secondary); }
+.seo-wb-stat-value { font-size: 20px; font-weight: 700; margin-top: 2px; }
+.seo-wb-pages { border: 1px solid var(--dsw-alias-border-l1); border-radius: 12px; background: var(--dsw-alias-bg-layer-1); overflow: hidden; }
+.seo-wb-pages-head { font-size: 13px; font-weight: 600; padding: 12px 14px 8px; }
+.seo-wb-pages-rows { display: flex; flex-direction: column; max-height: 380px; overflow-y: auto; }
+.seo-wb-page-row { padding: 8px 14px; border-top: 1px solid var(--dsw-alias-border-l1); }
+.seo-wb-page-row:hover { background: var(--dsw-alias-bg-layer-2); }
+.seo-wb-page-failed { border-left: 3px solid var(--dsw-alias-state-error-primary); }
+.seo-wb-page-main { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.seo-wb-page-url { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.seo-wb-page-failed .seo-wb-page-url { color: var(--dsw-alias-state-error-primary); }
+.seo-wb-page-meta { display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px; color: var(--dsw-alias-label-secondary); }
+.seo-wb-page-bad { color: var(--dsw-alias-state-error-primary); font-weight: 600; }
+.seo-wb-page-flags { display: flex; flex-wrap: wrap; gap: 4px; }
+.seo-wb-badge-site { color: var(--dsw-alias-state-warn-primary); background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 12%, transparent); }
 `;
 
     // ------------------------------------------------------------ register
