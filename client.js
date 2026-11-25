@@ -1422,7 +1422,20 @@ window.__ModuleLoader__.load({
         try {
           const data = await postJson('/seo-workbench/api/advice', {
             url: report.url,
-            report: { score: report.score, groups: report.groups, issues: report.issues, notes: report.notes },
+            report: {
+              score: report.score,
+              groups: report.groups,
+              issues: report.issues,
+              notes: report.notes,
+              mode: report.mode,
+              // Only flag-carrying pages are useful to the model; sending all rows
+              // would blow past the 128KB body cap on big crawls.
+              pages: (report.pages || []).filter((p) => p.failed || p.noindex || p.thin || p.dupTitle || p.dupDesc || p.orphan || p.missingH1 || p.missingTitle || p.missingDesc || p.missingCanonical).slice(0, 10),
+            },
+            deep: deep && deep.status === 'ok' ? deep : null,
+            crux: crux && crux.status === 'ok' ? crux : null,
+            search: search && search.result && search.result.status === 'ok' ? { result: search.result } : null,
+            keywords: keywords && keywords.data && keywords.data.status === 'ok' ? keywords.data : null,
             model: { provider, model },
           });
           if (data.status === 'error') throw new Error((data.error && data.error.message) || 'AI 建议失败');

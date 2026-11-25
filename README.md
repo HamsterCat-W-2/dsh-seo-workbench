@@ -25,7 +25,9 @@ A DeepSeek Harness plugin that runs technical SEO audits of websites from a dedi
    A Google PageSpeed Insights fallback (and its optional key) is used only when Chrome
    is unavailable; `<chrome path>` can be overridden with `SEO_WB_CHROME_PATH` or the plugin
    row `config.chromePath`.
-6. **AI 建议** sends the report to the model selected in the top bar and returns a prioritized
+6. **AI 建议** sends the report plus whatever extra data you already loaded (深度检测 lab CWV,
+   CrUX 字段数据, GSC/Bing 搜索数据, 关键词分析) to the model selected in the top bar, so the
+   prioritized advice is based on ALL collected evidence — not just the audit scores. Returns a prioritized
    fix plan. The model dropdown is fed by the Host's live provider/model catalog
    (`/seo-workbench/api/models`).
 7. **站点体检** (`POST /seo-workbench/api/site-audit`) BFS-crawls the site: seeds from

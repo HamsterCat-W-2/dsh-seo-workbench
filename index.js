@@ -145,7 +145,7 @@ function explainPsiError(message) {
   return '';
 }
 
-function buildAdvicePrompt(url, report) {
+function buildAdvicePrompt(url, report, extras = {}) {
   const score = report && report.score ? report.score : {};
   const groups = Array.isArray(report && report.groups) ? report.groups : [];
   const issues = Array.isArray(report && report.issues) ? report.issues : [];
@@ -154,6 +154,58 @@ function buildAdvicePrompt(url, report) {
     .slice(0, 12)
     .map((i, n) => `${n + 1}. [${i.severity || 'medium'}] ${i.title || i.id} — ${i.detail || i.evidence || ''}`)
     .join('\n');
+
+  const blocks = [];
+  // 深度检测（本机 Chrome Lab CWV）
+  if (extras.deep && extras.deep.status === 'ok') {
+    const d = extras.deep;
+    const cwv = d.cwv || {};
+    const parts = [];
+    if (cwv.lcpMs != null) parts.push(`LCP ${cwv.lcpMs}ms`);
+    if (cwv.fcpMs != null) parts.push(`FCP ${cwv.fcpMs}ms`);
+    if (cwv.ttfbMs != null) parts.push(`TTFB ${cwv.ttfbMs}ms`);
+    if (cwv.cls != null) parts.push(`CLS ${cwv.cls}`);
+    if (cwv.inpMs != null) parts.push(`INP ${cwv.inpMs}ms`);
+    if (cwv.tbtMs != null) parts.push(`TBT ${cwv.tbtMs}ms`);
+    blocks.push(`实验室性能（本机 Chrome 实测）：${parts.length ? parts.join('，') : '（无有效指标）'}`);
+  }
+  // CrUX 字段数据（真实用户 p75）
+  if (extras.crux && extras.crux.status === 'ok' && extras.crux.data && extras.crux.data.hasData) {
+    const c = extras.crux.data;
+    const cwv = c.cwv || {};
+    const parts = [];
+    if (cwv.lcpMs != null) parts.push(`LCP ${cwv.lcpMs}ms`);
+    if (cwv.cls != null) parts.push(`CLS ${cwv.cls}`);
+    if (cwv.inpMs != null) parts.push(`INP ${cwv.inpMs}ms`);
+    if (cwv.fcpMs != null) parts.push(`FCP ${cwv.fcpMs}ms`);
+    if (cwv.ttfbMs != null) parts.push(`TTFB ${cwv.ttfbMs}ms`);
+    blocks.push(`真实用户性能（CrUX p75，${(c.collectionPeriod && c.collectionPeriod.last) || '近 28 天'}）：${parts.length ? parts.join('，') : '（无有效指标）'}`);
+  }
+  // 搜索数据（GSC / 必应）
+  const searchResult = extras.search && extras.search.result;
+  if (searchResult && searchResult.status === 'ok') {
+    const src = searchResult.source === 'bing' ? '必应 Webmaster' : 'Google Search Console';
+    const t = searchResult.totals || {};
+    blocks.push(
+      `搜索数据（${src}）：点击 ${t.clicks ?? '?'} · 展示 ${t.impressions ?? '?'} · 平均排名 ${t.avgPosition ?? '?'}`,
+    );
+    const qs = (searchResult.queries || []).slice(0, 10);
+    if (qs.length) blocks.push(`Top 查询词：${qs.map((q) => `「${q.query}」点击 ${q.clicks} 展示 ${q.impressions} 排名 ${q.position}`).join('；')}`);
+  }
+  // 关键词分析（站内词频 + 缺口）
+  if (extras.keywords && extras.keywords.status === 'ok') {
+    const kd = extras.keywords;
+    const top = (kd.keywords || []).slice(0, 10);
+    if (top.length) blocks.push(`站内 Top 关键词：${top.map((k) => `「${k.keyword}」频次 ${k.count} · 覆盖 ${k.pages} 页${k.search ? ` · 点击 ${k.search.clicks} 展示 ${k.search.impressions} 排名 ${k.search.position}` : ''}`).join('；')}`);
+    if ((kd.clusters || []).length) blocks.push(`自相残杀（${kd.clusters.length} 组）：${kd.clusters.slice(0, 5).map((c) => `「${c.keyword}」在 ${c.pages.map((p) => p.url).join('、')} 重复`).join('；')}`);
+    if ((kd.unmatchedQueries || []).length) blocks.push(`内容缺口：${kd.unmatchedQueries.slice(0, 5).map((q) => `「${q.query}」展示 ${q.impressions} 点击 ${q.clicks}`).join('；')}`);
+  }
+  // 站点体检页面级标志（抽样）
+  if ((report.pages || []).length) {
+    const flagged = (report.pages || []).filter((p) => p.thin || p.dupTitle || p.orphan || p.noindex || p.missingH1 || p.failed).slice(0, 10);
+    if (flagged.length) blocks.push(`问题页面：${flagged.map((p) => `${p.url}（${[p.failed && '抓取失败', p.noindex && 'noindex', p.thin && '薄内容', p.dupTitle && '重复标题', p.orphan && '孤儿页', p.missingH1 && '缺 H1'].filter(Boolean).join(',') || '…'}）`).join('；')}`);
+  }
+
   return [
     '你是一位资深技术 SEO 顾问。下面是一个网站的自动体检结果，请用中文给出修复建议。',
     '',
@@ -161,12 +213,14 @@ function buildAdvicePrompt(url, report) {
     `总分：${score.total ?? '?'}/100`,
     `分组得分：\n${groupLines || '（无）'}`,
     `问题清单（已按严重度排序）：\n${issueLines || '（未发现问题）'}`,
+    blocks.length ? `补充数据：\n${blocks.join('\n')}` : '',
     '',
     '要求：',
     '1. 输出一份可执行的修复清单，按影响从大到小排序，最多 8 条；',
     '2. 每条一句话说明问题，一句话给出具体做法（标签、属性、跳转、压缩等具体值）；',
-    '3. 最后用 2–3 句话总结最值得优先处理的事项；',
-    '4. 只输出正文，不要客套话，不要重复我给的列表。',
+    '3. 结合补充数据（真实用户性能、搜索流量、站内关键词）判断优先级——流量高但排名靠后的词优先处理；',
+    '4. 最后用 2–3 句话总结最值得优先处理的事项；',
+    '5. 只输出正文，不要客套话，不要重复我给的列表。',
   ].join('\n');
 }
 
@@ -707,7 +761,12 @@ export function apply(ctx, config = {}) {
                 sendJson(res, 400, { status: 'error', error: { code: 'no-model', message: 'DHS 模型服务不可用，或未选择模型' } });
                 return;
               }
-              const prompt = buildAdvicePrompt(url, report);
+              const prompt = buildAdvicePrompt(url, report, {
+                deep: body && body.deep,
+                crux: body && body.crux,
+                search: body && body.search,
+                keywords: body && body.keywords,
+              });
               const signal = AbortSignal.timeout(90000);
               let text = '';
               let fallback = '';
