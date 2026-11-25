@@ -1832,7 +1832,7 @@ window.__ModuleLoader__.load({
       const keywordsOk = keywords && keywords.data && keywords.data.status === 'ok' ? keywords.data : null;
       const issueCount = report && report.issues ? report.issues.length : 0;
       const isSiteReport = report && report.mode === 'site';
-      const tabLabel = (id) => (id === 'issues' ? `问题（${issueCount}）` : id === 'details' ? '检查明细' : id === 'overview' ? (isSiteReport ? '站点概览' : '页面概况') : id === 'keywords' ? '关键词' : 'AI 建议');
+      const tabLabel = (id) => (id === 'issues' ? `问题（${issueCount}）` : id === 'details' ? '检查明细' : id === 'overview' ? (isSiteReport ? '站点概览' : '页面概况') : id === 'keywords' ? '关键词' : id === 'search' ? '搜索数据' : id === 'index' ? '索引状态' : id === 'perf' ? '性能检测' : 'AI 建议');
 
       return h(
         'div',
@@ -1965,12 +1965,10 @@ window.__ModuleLoader__.load({
                   h('button', { type: 'button', className: 'seo-wb-btn', onClick: copyMd }, copied === 'md' ? '已复制 ✓' : '复制'),
                 ),
               ),
-              isSiteReport ? null : h(DeepSection, { deep }),
-              h(CruxCard, { crux, onRun: runCruxField }),
               h(
                 'div',
                 { className: 'seo-wb-tabs', role: 'tablist' },
-                (isSiteReport ? ['issues', 'details', 'overview', 'keywords', 'advice'] : ['issues', 'details', 'overview', 'advice']).map((id) =>
+                (isSiteReport ? ['overview', 'issues', 'details', 'keywords', 'search', 'index', 'perf', 'advice'] : ['issues', 'details', 'overview', 'search', 'index', 'perf', 'advice']).map((id) =>
                   h(
                     'button',
                     {
@@ -1993,9 +1991,35 @@ window.__ModuleLoader__.load({
                     ? (isSiteReport ? h(SiteOverviewSection, { report }) : h(OverviewSection, { report }))
                     : tab === 'keywords'
                       ? h(KeywordsSection, { keywords, onRun: runKeywords, report })
-                      : h(
-                        'div',
-                        { className: 'seo-wb-advice' },
+                      : tab === 'search'
+                        ? h(SearchPanel, {
+                            provider: search.provider,
+                            url: searchUrl,
+                            onProvider: (p) => setSearch((s) => ({ ...s, provider: p, result: null, error: null })),
+                            onUrl: setSearchUrl,
+                            loading: search.loading,
+                            result: search.result,
+                            error: search.error,
+                            code: search.code,
+                            onCode: (v) => setSearch((s) => ({ ...s, code: v })),
+                            status: search.status,
+                            gscAuthorized: !!(gscToken && gscToken.refreshToken),
+                            onAuth: requestGscAuth,
+                            onExchange: finishGscAuth,
+                            onSearch: runSearchData,
+                          })
+                        : tab === 'index'
+                          ? h(IndexStatusPanel, { status: indexStatus, onRun: runIndexStatus })
+                          : tab === 'perf'
+                            ? h(
+                                'div',
+                                { className: 'seo-wb-perf' },
+                                isSiteReport ? null : h(DeepSection, { deep }),
+                                h(CruxCard, { crux, onRun: runCruxField }),
+                              )
+                            : h(
+                              'div',
+                              { className: 'seo-wb-advice' },
                         advice.loading ? h(Spinner, { label: '模型思考中…' }) : null,
                         advice.error ? h('div', { className: 'seo-wb-error', role: 'alert' }, advice.error) : null,
                         advice.text
@@ -2096,26 +2120,6 @@ window.__ModuleLoader__.load({
                 : h('div', { className: 'seo-wb-empty' }, '还没有分析记录 — 输入网址开始第一次分析')
               : null,
           ),
-        h(SearchPanel, {
-          provider: search.provider,
-          url: searchUrl,
-          onProvider: (p) => setSearch((s) => ({ ...s, provider: p, result: null, error: null })),
-          onUrl: setSearchUrl,
-          loading: search.loading,
-          result: search.result,
-          error: search.error,
-          code: search.code,
-          onCode: (v) => setSearch((s) => ({ ...s, code: v })),
-          status: search.status,
-          gscAuthorized: !!(gscToken && gscToken.refreshToken),
-          onAuth: requestGscAuth,
-          onExchange: finishGscAuth,
-          onSearch: runSearchData,
-        }),
-        h(IndexStatusPanel, {
-          status: indexStatus,
-          onRun: runIndexStatus,
-        }),
       );
     }
 
