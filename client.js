@@ -2181,6 +2181,8 @@ window.__ModuleLoader__.load({
 .seo-wb-tab { border: 0; background: none; font-family: inherit; font-size: 14px; color: var(--dsw-alias-label-secondary); padding: 9px 14px; border-radius: 8px 8px 0 0; cursor: pointer; border-bottom: 2px solid transparent; }
 .seo-wb-tab:hover { background: var(--dsw-alias-bg-layer-2); }
 .seo-wb-tab-active { color: var(--dsw-alias-label-primary); font-weight: 600; border-bottom-color: var(--dsw-alias-brand-primary); }
+.seo-wb-tabs { flex-wrap: wrap; }
+.seo-wb-perf { display: flex; flex-direction: column; gap: 16px; margin-top: 16px; }
 .seo-wb-issues, .seo-wb-details { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
 .seo-wb-issue, .seo-wb-group { background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l1); border-radius: 10px; overflow: hidden; }
 .seo-wb-issue-head, .seo-wb-group-head { display: flex; align-items: center; gap: 10px; padding: 11px 14px; cursor: pointer; user-select: none; }
