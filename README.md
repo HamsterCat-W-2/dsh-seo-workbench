@@ -38,12 +38,13 @@ A DeepSeek Harness plugin that runs technical SEO audits of websites from a dedi
    delete a single row, or clear all. 深度检测 and AI 建议 results are saved into the same
    entry — badges `深度` / `AI` / `站点` mark which ones the entry already has.
 9. **⚙ 设置** configures a default site (prefills the input), a PageSpeed API Key, the fetch
-   timeout, the max redirect count, the 站点体检 page cap (maxPages), and two optional path
-   filters for the crawl: **只抓这些路径** (`includePattern`) and **排除这些路径**
-   (`excludePattern`), both JavaScript regexes matched against each internal link's
-   `pathname + search`. Example: `excludePattern: ^/detail/` skips high-volume detail pages
-   so the page cap is not exhausted by them. Settings persist in localStorage and override
-   the row `config` per request.
+   timeout, the max redirect count, the 站点体检 page cap (maxPages), two optional path
+   filters for the crawl (**只抓这些路径** `includePattern` / **排除这些路径**
+   `excludePattern`), and **路径配额** (`pathQuotas`): newline-separated `regex=pages`
+   lines that sample a high-volume path instead of excluding it entirely — e.g.
+   `^/detail/=10` crawls at most 10 `/detail/*` pages, leaving the page cap for the rest of
+   the site. All regexes match each internal link's `pathname + search`. Settings persist in
+   localStorage and override the row `config` per request.
 
 ## Configuration
 
@@ -66,6 +67,7 @@ row `config` object — add a `config:` block to the patch row in the profile's
         maxPages: 30            # 站点体检 page cap (2–200)
         includePattern: ''      # optional regex; only crawl internal links whose path+query matches
         excludePattern: ''      # optional regex; skip internal links whose path+query matches (e.g. ^/detail/)
+        pathQuotas: ''          # optional, newline-separated "regex=pages" quotas, e.g. ^/detail/=10
 ```
 
 The deep check (`lib/localdeep.js`) is a one-shot headless Chrome run, so it measures a lab

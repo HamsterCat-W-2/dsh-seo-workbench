@@ -22,7 +22,7 @@ window.__ModuleLoader__.load({
     const LS_HISTORY = 'seo-wb-history';
     const LS_MODEL = 'seo-wb-model';
 
-    const DEFAULT_SETTINGS = { defaultSite: '', psiKey: '', timeoutMs: 15000, maxRedirects: 5, maxPages: 30, includePattern: '', excludePattern: '' };
+    const DEFAULT_SETTINGS = { defaultSite: '', psiKey: '', timeoutMs: 15000, maxRedirects: 5, maxPages: 30, includePattern: '', excludePattern: '', pathQuotas: '' };
 
     function lsGet(key, fallback) {
       try {
@@ -543,6 +543,9 @@ window.__ModuleLoader__.load({
           report.filters && (report.filters.includePattern || report.filters.excludePattern)
             ? h('div', { className: 'seo-wb-kv' }, h('dt', null, '路径过滤'), h('dd', { className: 'seo-wb-mono' }, [report.filters.includePattern ? `只抓 ${report.filters.includePattern}` : null, report.filters.excludePattern ? `排除 ${report.filters.excludePattern}` : null].filter(Boolean).join('；')))
             : null,
+          report.filters && report.filters.pathQuotas
+            ? h('div', { className: 'seo-wb-kv' }, h('dt', null, '路径配额'), h('dd', { className: 'seo-wb-mono' }, String(report.filters.pathQuotas).split(/\n+/).map((l) => l.trim()).filter(Boolean).join('；')))
+            : null,
           h('div', { className: 'seo-wb-kv' }, h('dt', null, '抓取深度'), h('dd', { className: 'seo-wb-mono' }, `上限 ${st.maxDepth ?? '-'} 层`)),
           h('div', { className: 'seo-wb-kv' }, h('dt', null, '耗时'), h('dd', { className: 'seo-wb-mono' }, `${Math.round(report.durationMs || 0)}ms`)),
         ),
@@ -696,6 +699,7 @@ window.__ModuleLoader__.load({
       ['maxPages', '站点体检最大页数', 'text', '单次抓取上限，默认 30（2–200）', '30'],
       ['includePattern', '只抓这些路径（正则，可空）', 'text', '作用于站内链接的「路径+查询串」；例 ^/blog/ 只抓博客区；留空 = 全部', '^/blog/'],
       ['excludePattern', '排除这些路径（正则，可空）', 'text', '跳过匹配的站内链接；例 ^/detail/ 跳过详情页（几万页也不会占满上限）；留空 = 不排除', '^/detail/'],
+      ['pathQuotas', '路径配额（每行一条：正则=页数）', 'textarea', '例：^/detail/=10 — /detail/ 最多抓 10 页，其余跳过，不占其他页面的额度；留空 = 不限制', '^/detail/=10'],
     ];
 
     function SettingsPanel({ open, saved, onClose, onSave }) {
@@ -723,13 +727,21 @@ window.__ModuleLoader__.load({
               'label',
               { key, className: 'seo-wb-field' },
               h('span', { className: 'seo-wb-field-label' }, label),
-              h('input', {
-                type,
-                value: value[key] === undefined || value[key] === null ? '' : value[key],
-                placeholder: ph,
-                onChange: set(key),
-                'aria-label': label,
-              }),
+              type === 'textarea'
+                ? h('textarea', {
+                    rows: 3,
+                    value: value[key] === undefined || value[key] === null ? '' : value[key],
+                    placeholder: ph,
+                    onChange: set(key),
+                    'aria-label': label,
+                  })
+                : h('input', {
+                    type,
+                    value: value[key] === undefined || value[key] === null ? '' : value[key],
+                    placeholder: ph,
+                    onChange: set(key),
+                    'aria-label': label,
+                  }),
               h('span', { className: 'seo-wb-field-hint' }, hint),
             ),
           ),
@@ -878,6 +890,7 @@ window.__ModuleLoader__.load({
             maxPages: Number(settings.maxPages) || 30,
             includePattern: String(settings.includePattern || '').trim(),
             excludePattern: String(settings.excludePattern || '').trim(),
+            pathQuotas: String(settings.pathQuotas || '').trim(),
           });
           if (data.status === 'error') throw new Error((data.error && data.error.message) || '站点体检失败');
           setReport(data);
@@ -1396,6 +1409,8 @@ window.__ModuleLoader__.load({
 .seo-wb-field-label { font-size: 13px; font-weight: 600; }
 .seo-wb-field input { background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; padding: 8px 10px; font-size: 13px; font-family: inherit; }
 .seo-wb-field input:focus { border-color: var(--dsw-alias-brand-primary); outline: none; }
+.seo-wb-field textarea { background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; padding: 8px 10px; font-size: 13px; font-family: inherit; resize: vertical; min-height: 64px; }
+.seo-wb-field textarea:focus { border-color: var(--dsw-alias-brand-primary); outline: none; }
 .seo-wb-field-hint { font-size: 11px; color: var(--dsw-alias-label-secondary); }
 .seo-wb-settings-actions { display: flex; gap: 8px; margin-top: 6px; }
 .seo-wb-settings-actions .seo-wb-btn-primary { margin-right: auto; }

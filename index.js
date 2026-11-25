@@ -212,6 +212,7 @@ export function apply(ctx, config = {}) {
             deadLinkSample: clampInt(body && body.deadLinkSample, 0, 100, 40),
             includePattern: body && typeof body.includePattern === 'string' ? body.includePattern : (config && config.includePattern) || '',
             excludePattern: body && typeof body.excludePattern === 'string' ? body.excludePattern : (config && config.excludePattern) || '',
+            pathQuotas: body && typeof body.pathQuotas === 'string' ? body.pathQuotas : (config && config.pathQuotas) || '',
           });
           if (crawl.status === 'error') return crawl;
           return buildSiteReport(crawl);

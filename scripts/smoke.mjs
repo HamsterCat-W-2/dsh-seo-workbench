@@ -104,6 +104,7 @@ const SITE_HOME = `<!doctype html>
   <a href="/thin">薄内容页</a>
   <a href="/dead-404">死链</a>
   <a href="/detail/1">详情页（用于路径过滤测试）</a>
+  <a href="/detail/2">详情页二（用于路径配额测试）</a>
   <a href="/admin">管理后台</a>
 </body>
 </html>`;
@@ -162,9 +163,9 @@ const server = http.createServer((req, res) => {
     res.end(SITE_ORPHAN);
     return;
   }
-  if (url === '/detail/1') {
+  if (url === '/detail/1' || url === '/detail/2') {
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-    res.end('<!doctype html><html lang="zh-CN"><head><title>详情页一（用于路径过滤测试的标题）</title><meta name="description" content="详情页的描述文字，用于验证路径过滤正则不会把详情页抓进来，同时保留其他页面"></head><body><h1>详情页</h1><p>' + '文'.repeat(320) + '</p></body></html>');
+    res.end('<!doctype html><html lang="zh-CN"><head><title>详情页（用于路径过滤/配额测试的标题）</title><meta name="description" content="详情页的描述文字，用于验证路径过滤正则和路径配额不会把详情页全部抓进来，同时保留其他页面"></head><body><h1>详情页</h1><p>' + '文'.repeat(320) + '</p></body></html>');
     return;
   }
   if (url === '/admin') {
@@ -279,6 +280,17 @@ try {
 
   const badPat = await crawlSite(`${base}/site/`, { maxPages: 30, maxDepth: 3, fetchTimeoutMs: 5000, excludePattern: '[' });
   assert(badPat.status === 'error' && badPat.error.code === 'bad-pattern', '非法正则应返回 bad-pattern');
+
+  // ---- path quotas: sample high-volume paths instead of excluding them.
+  const quota = await crawlSite(`${base}/site/`, { maxPages: 30, maxDepth: 3, fetchTimeoutMs: 5000, pathQuotas: '^/detail/=1' });
+  assert(quota.status === 'ok', `配额抓取应 ok，实际 ${quota.status}: ${JSON.stringify(quota.error)}`);
+  const detailCrawled = quota.pages.filter((p) => p.url.includes('/detail/'));
+  assert(detailCrawled.length === 1, `^/detail/=1 应只抓 1 个详情页，实际 ${detailCrawled.length}`);
+  assert(quota.stats.quotaLimited >= 1, `配额应记录 quotaLimited>=1，实际 ${quota.stats.quotaLimited}`);
+  assert((quota.filters || {}).pathQuotas === '^/detail/=1', 'filters 应回显 pathQuotas');
+  assert(quota.notes.some((n) => n.includes('配额')), '配额生效时应产生配额说明');
+  const badQuota = await crawlSite(`${base}/site/`, { maxPages: 30, maxDepth: 3, fetchTimeoutMs: 5000, pathQuotas: '^/detail/=x' });
+  assert(badQuota.status === 'error' && badQuota.error.code === 'bad-pattern', '非法配额格式应返回 bad-pattern');
   assert(orphanRows.some((p) => p.url.includes('/orphan')), `孤儿页应包含 /orphan，实际 ${orphanRows.map((p) => p.url).join(',')}`);
   const dupRows = site.pages.filter((p) => p.dupTitle);
   assert(dupRows.length >= 2, `应标记 >= 2 个重复标题页，实际 ${dupRows.length}`);
