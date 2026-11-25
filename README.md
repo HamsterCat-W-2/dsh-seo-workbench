@@ -90,6 +90,13 @@ A DeepSeek Harness plugin that runs technical SEO audits of websites from a dedi
    scope on panel mount/unmount via `POST /seo-workbench/api/tools/scope`), so other
    conversations never see them. Tool data sources fall back to settings/env (PSI key,
    CrUX key, Bing key, GSC OAuth tokens cached in the workbench).
+15. **对话（工作台内嵌）** — the workbench has a 对话 tab (also shown on the list page)
+   where you chat directly with the model selected in the top bar. The current analysis
+   data (score, groups, issues, deep CWV, CrUX, search data, keywords — whatever has been
+   loaded) is attached as context automatically, and answers stream in live over SSE
+   (`POST /seo-workbench/api/chat`). The conversation persists in localStorage
+   (`seo-wb-chat`, last 40 messages) and survives panel switches; 清空 resets it. Quick
+   question chips appear when the thread is empty.
 
 ## Configuration
 

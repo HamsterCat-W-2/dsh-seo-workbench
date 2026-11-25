@@ -22,6 +22,7 @@ window.__ModuleLoader__.load({
     const LS_HISTORY = 'seo-wb-history';
     const LS_MODEL = 'seo-wb-model';
     const LS_GSC = 'seo-wb-gsc';
+    const LS_CHAT = 'seo-wb-chat';
 
     const DEFAULT_SETTINGS = { defaultSite: '', psiKey: '', cruxKey: '', timeoutMs: 15000, maxRedirects: 5, maxPages: 100, includePattern: '', excludePattern: '', pathQuotas: '', gscClientId: '', gscClientSecret: '', bingApiKey: '' };
 
@@ -1210,6 +1211,76 @@ window.__ModuleLoader__.load({
       );
     }
 
+    // ---------------------------------------------------------------- chat
+
+    function ChatPanel({ chat, modelReady, onSend, onClear, compact }) {
+      const [draft, setDraft] = useState('');
+      const listRef = React.useRef(null);
+      useEffect(() => {
+        const el = listRef.current;
+        if (el) el.scrollTop = el.scrollHeight;
+      }, [chat.messages, chat.loading]);
+      const submit = () => {
+        const text = draft.trim();
+        if (!text || chat.loading) return;
+        setDraft('');
+        onSend(text);
+      };
+      const hints = chat.messages.length ? [] : ['这份报告最关键的问题是什么？', '按优先级给我一份修复清单', '怎么提升这个站点的排名？'];
+      return h(
+        'div',
+        { className: `seo-wb-chat${compact ? ' seo-wb-chat-compact' : ''}` },
+        h(
+          'div',
+          { className: 'seo-wb-panel-head' },
+          h('div', { className: 'seo-wb-section-title' }, '对话'),
+          h('span', { className: 'seo-wb-chip' }, '基于当前分析上下文'),
+          chat.messages.length ? h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-ghost seo-wb-chat-clear', onClick: onClear }, '清空') : null,
+        ),
+        h(
+          'div',
+          { className: 'seo-wb-chat-list', ref: listRef },
+          chat.messages.length
+            ? chat.messages.map((m, i) =>
+                h(
+                  'div',
+                  { key: i, className: `seo-wb-chat-row ${m.role === 'user' ? 'seo-wb-chat-user' : 'seo-wb-chat-ai'}` },
+                  h('div', { className: 'seo-wb-chat-bubble' }, m.content || (chat.loading && i === chat.messages.length - 1 ? '思考中…' : '')),
+                ),
+              )
+            : h('div', { className: 'seo-wb-chat-empty' }, modelReady ? '直接问我关于这个站点的问题 —— 当前的分析数据会自动作为上下文。' : '先在上方选择一个模型，然后就可以开始对话了。'),
+        ),
+        chat.error ? h('div', { className: 'seo-wb-error seo-wb-chat-error', role: 'alert' }, h('span', { className: 'seo-wb-error-mark' }, '!'), h('span', null, chat.error)) : null,
+        h(
+          'div',
+          { className: 'seo-wb-chat-inputrow' },
+          h('input', {
+            className: 'seo-wb-input',
+            value: draft,
+            onChange: (e) => setDraft(e.target.value),
+            onKeyDown: (e) => {
+              if (e.key === 'Enter' && !(e.isComposing || (e.nativeEvent && e.nativeEvent.isComposing))) {
+                e.preventDefault();
+                submit();
+              }
+            },
+            placeholder: modelReady ? '问一个关于这份报告的问题，回车发送…' : '先在上方选择模型',
+            maxLength: 2000,
+            'aria-label': '对话输入',
+            disabled: chat.loading,
+          }),
+          h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-primary', onClick: submit, disabled: chat.loading || !draft.trim() || !modelReady }, chat.loading ? '思考中…' : '发送'),
+        ),
+        hints.length
+          ? h(
+              'div',
+              { className: 'seo-wb-chat-hints' },
+              hints.map((text) => h('button', { key: text, type: 'button', className: 'seo-wb-chat-hint', onClick: () => onSend(text) }, text)),
+            )
+          : null,
+      );
+    }
+
     // ------------------------------------------------------------- settings
 
     const SETTINGS_SECTIONS = [
@@ -1329,6 +1400,7 @@ window.__ModuleLoader__.load({
       const [gscToken, setGscToken] = useState(() => lsGet(LS_GSC, {}));
       const [searchUrl, setSearchUrl] = useState('');
       const [indexStatus, setIndexStatus] = useState({ loading: false, error: null, data: null });
+      const [chat, setChat] = useState(() => { const saved = lsGet(LS_CHAT, []); return { messages: Array.isArray(saved) ? saved : [], loading: false, error: null }; });
       const [error, setError] = useState(null);
       const [tab, setTab] = useState('issues');
       const [openIssue, setOpenIssue] = useState(null);
@@ -1355,7 +1427,11 @@ window.__ModuleLoader__.load({
         // eslint-disable-next-line react-hooks/exhaustive-deps
       }, []);
 
-      // Panel open ⇔ seo_* agent tools visible to the chat agent; panel closed
+      // Keep the embedded chat across panel switches.
+      useEffect(() => {
+        lsSet(LS_CHAT, chat.messages.slice(-40));
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [chat.messages]);// Panel open ⇔ seo_* agent tools visible to the chat agent; panel closed
       // ⇔ tools vanish (host `when` gate). Fire-and-forget POSTs.
       useEffect(() => {
         postJson('/seo-workbench/api/tools/scope', { enabled: true }).catch(() => {});
@@ -1811,6 +1887,113 @@ window.__ModuleLoader__.load({
         }
       }
 
+      function chatSnapshot() {
+        const reportValue = report || null;
+        const keywordsOk = keywords && keywords.data && keywords.data.status === 'ok' ? keywords.data : null;
+        const searchOk = search && search.result && search.result.status === 'ok' ? { provider: search.provider, result: search.result } : null;
+        return {
+          report: reportValue
+            ? {
+                mode: reportValue.mode || 'page',
+                score: reportValue.score || null,
+                groups: Array.isArray(reportValue.groups) ? reportValue.groups : [],
+                issues: Array.isArray(reportValue.issues) ? reportValue.issues : [],
+                pages: Array.isArray(reportValue.pages) ? reportValue.pages : [],
+              }
+            : null,
+          deep: deep && deep.status === 'ok' ? deep : null,
+          crux: crux && crux.status === 'ok' ? crux : null,
+          search: searchOk,
+          keywords: keywordsOk,
+        };
+      }
+
+      async function sendChat(text) {
+        const q = String(text || '').trim();
+        if (!q || chat.loading) return;
+        if (!modelSel) {
+          setChat((c) => ({ ...c, error: '请先在上方选择模型' }));
+          return;
+        }
+        const [provider, model] = String(modelSel).split('|');
+        const nextMessages = [...chat.messages, { role: 'user', content: q }];
+        setChat({ messages: [...nextMessages, { role: 'assistant', content: '' }], loading: true, error: null });
+        try {
+          const resp = await fetch('/seo-workbench/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            cache: 'no-store',
+            body: JSON.stringify({
+              model: { provider, model },
+              messages: nextMessages.slice(-20),
+              url: (report && report.url) || input || undefined,
+              context: chatSnapshot(),
+            }),
+          });
+          if (!resp.ok || !resp.body) {
+            let data = null;
+            try {
+              data = await resp.json();
+            } catch {
+              /* ignore */
+            }
+            throw new Error((data && data.error && data.error.message) || `对话请求失败（HTTP ${resp.status}）`);
+          }
+          const reader = resp.body.getReader();
+          const decoder = new TextDecoder();
+          let buf = '';
+          let full = '';
+          let failure = null;
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            let idx;
+            while ((idx = buf.indexOf('\n\n')) >= 0) {
+              const raw = buf.slice(0, idx);
+              buf = buf.slice(idx + 2);
+              const line = raw.split('\n').find((l) => l.startsWith('data: '));
+              if (!line) continue;
+              let evt = null;
+              try {
+                evt = JSON.parse(line.slice(6));
+              } catch {
+                continue;
+              }
+              if (evt.type === 'delta' && typeof evt.text === 'string') {
+                full += evt.text;
+                setChat((c) => {
+                  const messages = c.messages.slice();
+                  const last = messages.length - 1;
+                  if (last >= 0 && messages[last].role === 'assistant') messages[last] = { role: 'assistant', content: full };
+                  return { ...c, messages };
+                });
+              } else if (evt.type === 'error') {
+                failure = new Error(evt.message || evt.code || '模型调用失败');
+              } else if (evt.type === 'done' && typeof evt.text === 'string' && !full) {
+                full = evt.text;
+              }
+            }
+          }
+          if (failure) throw failure;
+          if (!full.trim()) throw new Error('模型没有返回内容，请换个模型再试');
+          setChat((c) => {
+            const messages = c.messages.slice();
+            const last = messages.length - 1;
+            if (last >= 0 && messages[last].role === 'assistant') messages[last] = { role: 'assistant', content: full };
+            return { ...c, messages, loading: false, error: null };
+          });
+        } catch (err) {
+          const message = String((err && err.message) || err);
+          setChat((c) => {
+            const messages = c.messages.slice();
+            if (messages.length && messages[messages.length - 1].role === 'assistant' && !messages[messages.length - 1].content) messages.pop();
+            return { ...c, messages, loading: false, error: /fetch|network|load failed/i.test(message) ? '无法连接对话服务（插件宿主未加载或已崩溃，请重启 DSH 后重试）' : message };
+          });
+        }
+      }
+
       function backToList() {
         setReport(null);
         setDeep(null);
@@ -1887,7 +2070,7 @@ window.__ModuleLoader__.load({
         }
         return [...map.values()];
       })();
-      const tabLabel = (id) => (id === 'issues' ? `问题（${issueCount}）` : id === 'details' ? '检查明细' : id === 'overview' ? (isSiteReport ? '站点概览' : '页面概况') : id === 'keywords' ? '关键词' : id === 'search' ? '搜索数据' : id === 'index' ? '索引状态' : id === 'perf' ? '性能检测' : 'AI 建议');
+      const tabLabel = (id) => (id === 'issues' ? `问题（${issueCount}）` : id === 'details' ? '检查明细' : id === 'overview' ? (isSiteReport ? '站点概览' : '页面概况') : id === 'keywords' ? '关键词' : id === 'search' ? '搜索数据' : id === 'index' ? '索引状态' : id === 'perf' ? '性能检测' : id === 'advice' ? 'AI 建议' : '对话');
 
       return h(
         'div',
@@ -1989,6 +2172,7 @@ window.__ModuleLoader__.load({
         }),
 
         error ? h('div', { className: 'seo-wb-error', role: 'alert' }, h('span', { className: 'seo-wb-error-mark' }, '!'), h('span', null, error)) : null,
+        !report ? h(ChatPanel, { chat, modelReady: !!modelSel, onSend: sendChat, onClear: () => setChat({ messages: [], loading: false, error: null }), compact: true }) : null,
 
         report
           ? h(
@@ -2032,7 +2216,7 @@ window.__ModuleLoader__.load({
               h(
                 'div',
                 { className: 'seo-wb-tabs', role: 'tablist' },
-                (isSiteReport ? ['overview', 'issues', 'details', 'keywords', 'search', 'index', 'perf', 'advice'] : ['issues', 'details', 'overview', 'search', 'index', 'perf', 'advice']).map((id) =>
+                (isSiteReport ? ['overview', 'issues', 'chat', 'details', 'keywords', 'search', 'index', 'perf', 'advice'] : ['issues', 'chat', 'details', 'overview', 'search', 'index', 'perf', 'advice']).map((id) =>
                   h(
                     'button',
                     {
@@ -2074,7 +2258,9 @@ window.__ModuleLoader__.load({
                           })
                         : tab === 'index'
                           ? h(IndexStatusPanel, { status: indexStatus, onRun: runIndexStatus })
-                          : tab === 'perf'
+                          : tab === 'chat'
+                            ? h(ChatPanel, { chat, modelReady: !!modelSel, onSend: sendChat, onClear: () => setChat({ messages: [], loading: false, error: null }) })
+                            : tab === 'perf'
                             ? h(
                                 'div',
                                 { className: 'seo-wb-perf' },
@@ -2445,6 +2631,24 @@ window.__ModuleLoader__.load({
 .seo-wb-crux-panel { margin-top: 16px; }
 .seo-wb-crux-body { display: flex; flex-direction: column; gap: 8px; }
 .seo-wb-crux-note { font-size: 12px; color: var(--dsw-alias-label-secondary); }
+.seo-wb-chat { margin-top: 20px; display: flex; flex-direction: column; gap: 10px; }
+.seo-wb-chat-compact { margin-top: 24px; }
+.seo-wb-chat .seo-wb-panel-head { display: flex; align-items: center; gap: 8px; }
+.seo-wb-chat-list { display: flex; flex-direction: column; gap: 8px; max-height: 320px; overflow-y: auto; padding: 2px; }
+.seo-wb-chat-row { display: flex; }
+.seo-wb-chat-user { justify-content: flex-end; }
+.seo-wb-chat-ai { justify-content: flex-start; }
+.seo-wb-chat-bubble { max-width: 86%; padding: 8px 12px; border-radius: 10px; font-size: 13px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+.seo-wb-chat-user .seo-wb-chat-bubble { background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1); color: var(--dsw-alias-label-primary); }
+.seo-wb-chat-ai .seo-wb-chat-bubble { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 10%, var(--dsw-alias-bg-layer-1)); border: 1px solid var(--dsw-alias-border-l1); color: var(--dsw-alias-label-primary); }
+.seo-wb-chat-empty { padding: 16px; color: var(--dsw-alias-label-secondary); font-size: 13px; text-align: center; border: 1px dashed var(--dsw-alias-border-l1); border-radius: 10px; }
+.seo-wb-chat-inputrow { display: flex; gap: 8px; align-items: center; }
+.seo-wb-chat-inputrow .seo-wb-input { flex: 1; min-width: 0; }
+.seo-wb-chat-clear { font-size: 12px; padding: 4px 10px; margin-left: auto; }
+.seo-wb-chat-hints { display: flex; flex-wrap: wrap; gap: 8px; }
+.seo-wb-chat-hint { font-size: 12px; padding: 5px 10px; border-radius: 999px; background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1); color: var(--dsw-alias-label-primary); cursor: pointer; }
+.seo-wb-chat-hint:hover { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
+.seo-wb-chat-error { margin-top: 0; }
 `;
 
     // ------------------------------------------------------------ register

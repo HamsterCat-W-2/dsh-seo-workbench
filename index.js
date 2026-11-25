@@ -225,6 +225,76 @@ function buildAdvicePrompt(url, report, extras = {}) {
 }
 
 /* ------------------------------------------------------------------------ *
+ * Embedded chat — the in-workbench conversation. Reuses the same Host `llm`
+ * stream as AI 建议, but keeps a message history and streams deltas over SSE
+ * so the panel can render the answer live.
+ * ------------------------------------------------------------------------ */
+
+/** Compact Chinese context snapshot for the chat system prompt. */
+function buildChatContext(url, context) {
+  if (!context) return '';
+  const lines = [];
+  if (url) lines.push(`当前分析的网站：${url}`);
+  const report = context.report || null;
+  if (report) {
+    lines.push(
+      `分析总分：${report.score && report.score.total != null ? report.score.total : '?'}/100（${report.mode === 'site' ? '站点体检' : '单页分析'}）`,
+    );
+    const groups = Array.isArray(report.groups) ? report.groups : [];
+    if (groups.length) lines.push(`分组得分：${groups.map((g) => `${g.label || g.id} ${g.score}`).join(' · ')}`);
+    const issues = Array.isArray(report.issues) ? report.issues : [];
+    if (issues.length) {
+      lines.push(
+        `问题（${issues.length} 条，按严重度排序）：${issues
+          .slice(0, 12)
+          .map((i) => `[${i.severity}] ${i.title}`)
+          .join('；')}`,
+      );
+    }
+    if (Array.isArray(report.pages) && report.pages.length) lines.push(`站点抓取页数：${report.pages.length} 页`);
+  }
+  const deep = context.deep || null;
+  if (deep && deep.status === 'ok' && deep.cwv) {
+    const c = deep.cwv;
+    lines.push(
+      `深度检测（${deep.source === 'local-chrome' ? '本地 Chrome Lab' : 'PageSpeed'}）：LCP ${c.lcpMs}ms · CLS ${c.cls} · TTFB ${c.ttfbMs}ms · FCP ${c.fcpMs}ms${c.tbtMs ? ` · TBT ${c.tbtMs}ms` : ''}`,
+    );
+  }
+  const crux = context.crux || null;
+  if (crux && crux.status === 'ok' && crux.data && crux.data.hasData) {
+    const c = crux.data.cwv || {};
+    lines.push(`真实用户 CWV（CrUX p75）：LCP ${c.lcpMs}ms · CLS ${c.cls} · INP ${c.inpMs}ms · FCP ${c.fcpMs}ms · TTFB ${c.ttfbMs}ms`);
+  }
+  const search = context.search || null;
+  if (search && search.result && search.result.status === 'ok') {
+    const t = search.result.totals || {};
+    lines.push(
+      `搜索数据（${search.result.source === 'bing' ? '必应 Webmaster' : 'Google Search Console'}）：点击 ${t.clicks ?? '?'} · 展示 ${t.impressions ?? '?'} · 平均排名 ${t.avgPosition ?? '?'}`,
+    );
+    const qs = (search.result.queries || []).slice(0, 8);
+    if (qs.length) lines.push(`Top 查询词：${qs.map((q) => `「${q.query}」点击 ${q.clicks} 展示 ${q.impressions} 排名 ${q.position}`).join('；')}`);
+  }
+  const kw = context.keywords || null;
+  if (kw && kw.status === 'ok' && Array.isArray(kw.keywords) && kw.keywords.length) {
+    lines.push(`站内 Top 关键词：${kw.keywords.slice(0, 10).map((k) => `「${k.keyword}」×${k.count} 覆盖 ${k.pages} 页`).join('；')}`);
+    if (Array.isArray(kw.clusters) && kw.clusters.length) lines.push(`自相残杀：${kw.clusters.slice(0, 5).map((c) => c.keyword).join('、')}`);
+    if (Array.isArray(kw.unmatchedQueries) && kw.unmatchedQueries.length) lines.push(`内容缺口：${kw.unmatchedQueries.slice(0, 5).map((q) => q.query).join('、')}`);
+  }
+  return lines.join('\n');
+}
+
+function chatSystemPrompt(url, context) {
+  const block = buildChatContext(url, context);
+  return [
+    '你是一名内嵌在 DSH「SEO 分析工作台」里的资深技术 SEO 顾问，正在和用户对话。',
+    '回答简洁、具体、可执行，用中文；必要时用小标题和 markdown 列表。',
+    '只依据下面给出的分析数据回答，不要编造数字；数据缺失时如实说明，再给通用建议。',
+    block ? `\n当前分析数据：\n${block}` : '\n当前还没有分析数据。如果用户还没给网址，先邀请他输入网址开始分析；也可以直接回答通用 SEO 问题。',
+    '\n如果用户的问题需要新的检测（抓取、关键词、搜索数据、性能等），提醒他可以回到工作台点对应的按钮（分析 / 站点体检 / 关键词 / 搜索数据 / 索引状态 / 性能检测）。',
+  ].join('\n');
+}
+
+/* ------------------------------------------------------------------------ *
  * Agent tools — registered into the Host `tools` service so any DSH chat
  * agent can call the workbench directly ("帮我分析 https://x.com 的 SEO").
  * Results are bounded Chinese markdown summaries: the deep link (full report,
@@ -1169,6 +1239,102 @@ export function apply(ctx, config = {}) {
         },
       }),
     'seo-workbench: advice route',
+  );
+
+  // POST /api/chat — embedded workbench conversation. Streams the model answer
+  // as SSE (`data: {"type":"delta","text":…}` events, then "done" or "error").
+  ctx.effect(
+    () =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path: `${API}chat`,
+        handler: (req, res) => {
+          if (req.method !== 'POST') {
+            sendJson(res, 405, { error: 'method-not-allowed' });
+            return;
+          }
+          readBody(req)
+            .then((raw) => {
+              let body;
+              try {
+                body = JSON.parse(raw || '{}');
+              } catch {
+                sendJson(res, 400, { status: 'error', error: { code: 'bad-json', message: 'invalid JSON' } });
+                return;
+              }
+              const modelSel = body && body.model;
+              const messages = Array.isArray(body && body.messages) ? body.messages : [];
+              if (!messages.length) {
+                sendJson(res, 400, { status: 'error', error: { code: 'missing-input', message: '消息不能为空' } });
+                return;
+              }
+              if (!modelSel || !modelSel.provider || !modelSel.model) {
+                sendJson(res, 400, { status: 'error', error: { code: 'no-model', message: '请先选择一个模型' } });
+                return;
+              }
+              if (!llm) {
+                sendJson(res, 503, { status: 'error', error: { code: 'llm-failed', message: '模型服务不可用' } });
+                return;
+              }
+              res.writeHead(200, {
+                'Content-Type': 'text/event-stream; charset=utf-8',
+                'Cache-Control': 'no-cache',
+                Connection: 'keep-alive',
+                'X-Accel-Buffering': 'no',
+              });
+              let closed = false;
+              req.on('close', () => {
+                closed = true;
+              });
+              const send = (payload) => {
+                if (!closed) res.write(`data: ${JSON.stringify(payload)}\n\n`);
+              };
+              send({ type: 'start' });
+              const chatMessages = messages.slice(-24).map((m) =>
+                m.role === 'assistant'
+                  ? {
+                      role: 'assistant',
+                      content: [{ type: 'text', text: String(m.content || '') }],
+                      source: { kind: 'model', provider: modelSel.provider, model: modelSel.model },
+                    }
+                  : { role: 'user', content: [{ type: 'text', text: String(m.content || '') }], source: { kind: 'user' } },
+              );
+              (async () => {
+                let text = '';
+                let fallback = '';
+                try {
+                  for await (const chunk of llm.stream({
+                    provider: modelSel.provider,
+                    model: modelSel.model,
+                    sessionId: 'seo-workbench-chat',
+                    messages: chatMessages,
+                    system: chatSystemPrompt(body.url, body.context),
+                    temperature: 0.7,
+                    signal: AbortSignal.timeout(120000),
+                  })) {
+                    const piece = chunkText(chunk);
+                    if (piece) {
+                      text += piece;
+                      send({ type: 'delta', text: piece });
+                    }
+                    const full = messageText(chunk);
+                    if (full) fallback = full;
+                  }
+                } catch (err) {
+                  send({ type: 'error', code: 'llm-failed', message: String((err && err.message) || err || 'llm call failed') });
+                  if (!closed) res.end();
+                  return;
+                }
+                const output = (text || fallback || '').trim();
+                if (!output) send({ type: 'error', code: 'empty-output', message: '模型没有返回内容，请换个模型再试' });
+                else send({ type: 'done', text: output });
+                if (!closed) res.end();
+              })();
+            })
+            .catch(() => sendJson(res, 500, { status: 'error', error: { code: 'internal', message: 'internal' } }));
+        },
+      }),
+    'seo-workbench: chat route',
   );
 
   // POST /api/tools/scope {enabled} — the client toggles this when the
