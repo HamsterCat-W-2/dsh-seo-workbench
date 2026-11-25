@@ -1606,7 +1606,7 @@ window.__ModuleLoader__.load({
                 ),
               ),
               isSiteReport ? null : h(DeepSection, { deep }),
-              isSiteReport ? null : h(CruxCard, { crux, onRun: runCruxField }),
+              h(CruxCard, { crux, onRun: runCruxField }),
               h(
                 'div',
                 { className: 'seo-wb-tabs', role: 'tablist' },
