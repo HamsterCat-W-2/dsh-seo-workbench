@@ -417,31 +417,117 @@ export function apply(ctx, config = {}) {
     clientId: (config && config.gscClientId) || process.env.GSC_CLIENT_ID || '',
     clientSecret: (config && config.gscClientSecret) || process.env.GSC_CLIENT_SECRET || '',
   });
+  // Loopback OAuth: the client asks for the consent URL (POST, carrying the
+  // user's client id/secret from settings); Google redirects back to the
+  // gsc-callback route below, which exchanges the code and parks the token
+  // here for the client to pull.
+  let gscClientCreds = null;
+  let gscPendingToken = null;
+  const sendHtml = (res, status, title, body) => {
+    res.writeHead(status, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+    res.end(
+      `<!doctype html><html><head><meta charset="utf-8"><title>SEO 分析 · Google 授权</title></head><body style="font-family:system-ui;padding:40px;max-width:560px;margin:0 auto;line-height:1.7;color:#333"><h2 style="font-size:18px;margin:0 0 12px">${title}</h2><p style="margin:0">${body}</p></body></html>`,
+    );
+  };
 
-  // GET /api/gsc/auth-url?clientId=&redirectUri= — build the consent URL.
+  // POST /api/gsc/auth-url {clientId, clientSecret} — build the consent URL with
+  // a loopback redirect back to this Host (no manual code paste needed).
   ctx.effect(
     () =>
       ctx.webServer.register({
         kind: 'exact',
         path: `${API}gsc/auth-url`,
         handler: (req, res) => {
+          readBody(req)
+            .then((raw) => {
+              let body = {};
+              try {
+                body = JSON.parse(raw || '{}');
+              } catch {
+                sendJson(res, 400, { status: 'error', error: { code: 'bad-json', message: 'invalid JSON' } });
+                return;
+              }
+              try {
+                const cfg = gscConfig();
+                const clientId = (body && body.clientId) || cfg.clientId;
+                if (!clientId) {
+                  sendJson(res, 200, { status: 'error', error: { code: 'no-client-id', message: '未配置 Google OAuth Client ID（⚙ 设置 → 搜索数据）' } });
+                  return;
+                }
+                const clientSecret = (body && body.clientSecret) || cfg.clientSecret;
+                gscClientCreds = { clientId, clientSecret };
+                const origin = ctx.webServer.getOrigin ? ctx.webServer.getOrigin() : '';
+                const redirectUri = origin ? `${origin}${API}gsc-callback` : 'urn:ietf:wg:oauth:2.0:oob';
+                const result = buildAuthUrl({ clientId, redirectUri });
+                sendJson(res, 200, result);
+              } catch (err) {
+                sendJson(res, 500, { status: 'error', error: { code: 'internal', message: String((err && err.message) || err) } });
+              }
+            })
+            .catch(() => sendJson(res, 500, { status: 'error', error: { code: 'internal', message: 'internal' } }));
+        },
+      }),
+    'seo-workbench: gsc auth-url route',
+  );
+
+  // GET /api/gsc-callback?code=... — Google redirects here after consent. The
+  // code is exchanged immediately; the token is parked for the client to pull.
+  ctx.effect(
+    () =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path: `${API}gsc-callback`,
+        handler: async (req, res) => {
+          try {
+            const u = new URL(req.url, 'http://local');
+            const code = u.searchParams.get('code');
+            const errQ = u.searchParams.get('error');
+            if (!code) {
+              sendHtml(res, 200, '授权没有完成', errQ ? `Google 返回：${errQ}` : '没有收到授权码（可能取消或拒绝授权）。');
+              return;
+            }
+            const cfg = gscConfig();
+            const creds = gscClientCreds || { clientId: cfg.clientId, clientSecret: cfg.clientSecret };
+            if (!creds.clientId || !creds.clientSecret) {
+              sendHtml(res, 200, '缺少 Client ID / Secret', '请先在 DSH 的 ⚙ 设置 → 搜索数据 里填好 OAuth Client ID 和 Secret，再重新点「获取授权链接」。');
+              return;
+            }
+            const result = await exchangeCode({ clientId: creds.clientId, clientSecret: creds.clientSecret, code });
+            if (!result || result.status !== 'ok') {
+              sendHtml(res, 200, '授权码兑换失败', (result && result.error && result.error.message) || '未知错误');
+              return;
+            }
+            gscPendingToken = {
+              accessToken: result.accessToken || '',
+              refreshToken: result.refreshToken || '',
+              expiresAt: Date.now() + (Number(result.expiresIn) || 3600) * 1000,
+            };
+            sendHtml(res, 200, '✓ 授权成功', '这个页面可以关掉了，回到 DSH 的「搜索数据」面板即可（令牌会自动收取并保存到本地）。');
+          } catch (err) {
+            sendHtml(res, 500, '回调处理失败', String((err && err.message) || err));
+          }
+        },
+      }),
+    'seo-workbench: gsc callback route',
+  );
+
+  // GET /api/gsc/pull-token — one-shot hand-off of the parked OAuth token.
+  ctx.effect(
+    () =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path: `${API}gsc/pull-token`,
+        handler: (req, res) => {
           if (req.method !== 'GET') {
             sendJson(res, 405, { error: 'method-not-allowed' });
             return;
           }
-          try {
-            const u = new URL(req.url, 'http://local');
-            const cfg = gscConfig();
-            const clientId = u.searchParams.get('clientId') || cfg.clientId;
-            const redirectUri = u.searchParams.get('redirectUri') || 'urn:ietf:wg:oauth:2.0:oob';
-            const result = buildAuthUrl({ clientId, redirectUri });
-            sendJson(res, 200, result);
-          } catch (err) {
-            sendJson(res, 500, { status: 'error', error: { code: 'internal', message: String((err && err.message) || err) } });
-          }
+          const token = gscPendingToken;
+          gscPendingToken = null;
+          sendJson(res, 200, { status: 'ok', token });
         },
       }),
-    'seo-workbench: gsc auth-url route',
+    'seo-workbench: gsc pull-token route',
   );
 
   // POST /api/gsc/token {clientId, clientSecret, code} — exchange authorization code.

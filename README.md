@@ -54,8 +54,10 @@ A DeepSeek Harness plugin that runs technical SEO audits of websites from a dedi
 11. **搜索数据** — the search-data panel pulls real rankings/clicks/impressions for a site:
    - **Google Search Console** (`POST /seo-workbench/api/gsc/*`): OAuth-based. Fill
      `gscClientId` / `gscClientSecret` (Google Cloud → Credentials → OAuth client, Desktop
-     app + enable the **Search Console API**), then ① get the auth link (opens Google login),
-     ② paste the code, ③ finish auth. Tokens are stored locally (`seo-wb-gsc`). Then enter the
+     app + enable the **Search Console API**), then ① 获取授权链接 opens Google login and
+     redirects straight back to a loopback callback (`/api/gsc-callback`) that exchanges the
+     code automatically — no manual code paste; the panel polls `/api/gsc/pull-token` and
+     stores the tokens locally (`seo-wb-gsc`). A paste-code fallback remains. Then enter the
      site URL and 查询 → totals, Top 查询词 and Top 页面 for the last 28 days.
    - **必应 Webmaster** (`POST /seo-workbench/api/bing`): needs a Bing API Key
      (bing.com/webmasters → API 访问), then 查询 returns the same totals/query/page tables.

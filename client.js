@@ -849,7 +849,7 @@ window.__ModuleLoader__.load({
       );
     }
 
-    function SearchPanel({ provider, url, onProvider, onUrl, loading, result, error, code, onCode, gscAuthorized, onAuth, onExchange, onSearch }) {
+    function SearchPanel({ provider, url, onProvider, onUrl, loading, result, error, code, onCode, status, gscAuthorized, onAuth, onExchange, onSearch }) {
       return h(
         'div',
         { className: 'seo-wb-panel seo-wb-search-panel' },
@@ -905,17 +905,18 @@ window.__ModuleLoader__.load({
                       h(
                         'div',
                         { className: 'seo-wb-search-auth-steps' },
-                        h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-mini', onClick: onAuth }, '① 获取授权链接（会打开 Google 登录）'),
+                        h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-mini', onClick: onAuth }, '① 获取授权链接（打开 Google 登录，授权完自动收码）'),
+                        h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-mini', onClick: onExchange }, '手动收码'),
                       ),
                       h(
                         'div',
                         { className: 'seo-wb-search-auth-code' },
-                        h('input', { className: 'seo-wb-input', value: code, onChange: (e) => onCode(e.target.value), placeholder: '② 登录后把授权码粘贴到这里' }),
-                        h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-mini', onClick: onExchange }, '③ 完成授权'),
+                        h('input', { className: 'seo-wb-input', value: code, onChange: (e) => onCode(e.target.value), placeholder: '（兜底）授权页里粘贴不了就手动填授权码' }),
                       ),
                     ),
               )
             : null,
+          status ? h('div', { className: 'seo-wb-search-auth-ok' }, status) : null,
           error ? h('div', { className: 'seo-wb-error', role: 'alert' }, error) : null,
           loading ? h(Spinner, { label: provider === 'gsc' ? '查询 Search Console…' : '查询必应 Webmaster…' }) : null,
           result ? h(SearchResult, { provider, result }) : null,
@@ -1037,7 +1038,7 @@ window.__ModuleLoader__.load({
       const [deep, setDeep] = useState(null);
       const [advice, setAdvice] = useState({ loading: false, text: '', error: null });
       const [crux, setCrux] = useState(null); // {loading} | {status:'ok',data:{...}} | {status:'error',error}
-      const [search, setSearch] = useState({ provider: 'gsc', loading: false, result: null, error: null, code: '' });
+      const [search, setSearch] = useState({ provider: 'gsc', loading: false, result: null, error: null, code: '', status: '' });
       const [gscToken, setGscToken] = useState(() => lsGet(LS_GSC, {}));
       const [searchUrl, setSearchUrl] = useState('');
       const [error, setError] = useState(null);
@@ -1271,23 +1272,38 @@ window.__ModuleLoader__.load({
 
       async function requestGscAuth() {
         const clientId = String(settings.gscClientId || '').trim();
-        if (!clientId) {
+        const clientSecret = String(settings.gscClientSecret || '').trim();
+        if (!clientId || !clientSecret) {
           setSearch((s) => ({ ...s, error: '请先在 ⚙ 设置 → 搜索数据 填 Google OAuth Client ID / Secret。' }));
           return;
         }
         try {
-          const resp = await fetch(
-            `/seo-workbench/api/gsc/auth-url?clientId=${encodeURIComponent(clientId)}&redirectUri=${encodeURIComponent('urn:ietf:wg:oauth:2.0:oob')}`,
-            { credentials: 'same-origin', cache: 'no-store' },
-          );
-          const data = await resp.json();
+          const data = await postJson('/seo-workbench/api/gsc/auth-url', { clientId, clientSecret });
           if (data.status !== 'ok') {
             setSearch((s) => ({ ...s, error: mapSearchError(data.error) }));
             return;
           }
           window.open(data.url, '_blank', 'noopener');
+          setSearch((s) => ({ ...s, status: '授权页已打开，登录并同意后会自动收码…', error: null }));
+          // Poll the one-shot pull-token route until the callback lands (or timeout).
+          for (let i = 0; i < 150; i += 1) {
+            await new Promise((r) => setTimeout(r, 1500));
+            try {
+              const resp = await fetch('/seo-workbench/api/gsc/pull-token', { credentials: 'same-origin', cache: 'no-store' });
+              const t = await resp.json();
+              if (t && t.status === 'ok' && t.token && t.token.refreshToken) {
+                setGscToken(t.token);
+                lsSet(LS_GSC, t.token);
+                setSearch((s) => ({ ...s, status: '✓ 授权成功，令牌已保存到本地', error: null }));
+                return;
+              }
+            } catch {
+              // transient — keep polling
+            }
+          }
+          setSearch((s) => ({ ...s, status: '没等到授权结果，点「手动收码」或重新点「获取授权链接」。', error: null }));
         } catch (err) {
-          setSearch((s) => ({ ...s, error: err.message || String(err) }));
+          setSearch((s) => ({ ...s, status: '', error: err.message || String(err) }));
         }
       }
 
@@ -1669,6 +1685,7 @@ window.__ModuleLoader__.load({
           error: search.error,
           code: search.code,
           onCode: (v) => setSearch((s) => ({ ...s, code: v })),
+          status: search.status,
           gscAuthorized: !!(gscToken && gscToken.refreshToken),
           onAuth: requestGscAuth,
           onExchange: finishGscAuth,
