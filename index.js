@@ -210,6 +210,8 @@ export function apply(ctx, config = {}) {
             maxRedirects: clampInt(body && body.maxRedirects, 0, 10, baseAuditOptions.maxRedirects),
             userAgent: baseAuditOptions.userAgent,
             deadLinkSample: clampInt(body && body.deadLinkSample, 0, 100, 40),
+            includePattern: body && typeof body.includePattern === 'string' ? body.includePattern : (config && config.includePattern) || '',
+            excludePattern: body && typeof body.excludePattern === 'string' ? body.excludePattern : (config && config.excludePattern) || '',
           });
           if (crawl.status === 'error') return crawl;
           return buildSiteReport(crawl);

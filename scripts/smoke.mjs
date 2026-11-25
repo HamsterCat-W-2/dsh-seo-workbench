@@ -103,6 +103,7 @@ const SITE_HOME = `<!doctype html>
   <a href="/dup-b">重复页 B</a>
   <a href="/thin">薄内容页</a>
   <a href="/dead-404">死链</a>
+  <a href="/detail/1">详情页（用于路径过滤测试）</a>
   <a href="/admin">管理后台</a>
 </body>
 </html>`;
@@ -159,6 +160,11 @@ const server = http.createServer((req, res) => {
   if (url === '/orphan') {
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     res.end(SITE_ORPHAN);
+    return;
+  }
+  if (url === '/detail/1') {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end('<!doctype html><html lang="zh-CN"><head><title>详情页一（用于路径过滤测试的标题）</title><meta name="description" content="详情页的描述文字，用于验证路径过滤正则不会把详情页抓进来，同时保留其他页面"></head><body><h1>详情页</h1><p>' + '文'.repeat(320) + '</p></body></html>');
     return;
   }
   if (url === '/admin') {
@@ -258,6 +264,21 @@ try {
   assert(site.issues.every((i) => i.pages && i.pages.length >= 0), 'site 问题应携带 pages 明细');
   const orphanRows = site.pages.filter((p) => p.orphan);
   assert(orphanRows.length >= 1, '应标记出孤儿页');
+
+  // ---- URL path filters: excludePattern / includePattern (regex over path+query).
+  const excl = await crawlSite(`${base}/site/`, { maxPages: 30, maxDepth: 3, fetchTimeoutMs: 5000, excludePattern: '^/detail/' });
+  assert(excl.status === 'ok', `exclude 抓取应 ok，实际 ${excl.status}: ${JSON.stringify(excl.error)}`);
+  assert(!excl.pages.some((p) => p.url.includes('/detail/')), 'excludePattern ^/detail/ 不应抓取详情页');
+  assert(excl.stats.filtered >= 1, `excludePattern 应记录 filtered>=1，实际 ${excl.stats.filtered}`);
+  assert((excl.filters || {}).excludePattern === '^/detail/', 'filters 应回显 excludePattern');
+  assert(excl.notes.some((n) => n.includes('过滤')), 'excludePattern 生效时应产生过滤说明');
+
+  const incl = await crawlSite(`${base}/site/`, { maxPages: 30, maxDepth: 3, fetchTimeoutMs: 5000, includePattern: '^/dup-' });
+  assert(incl.status === 'ok', `include 抓取应 ok，实际 ${incl.status}: ${JSON.stringify(incl.error)}`);
+  assert(incl.pages.every((p) => new URL(p.url).pathname === '/site/' || p.url.includes('/dup-')), 'includePattern ^/dup- 只应抓入口页和 /dup-* 页面');
+
+  const badPat = await crawlSite(`${base}/site/`, { maxPages: 30, maxDepth: 3, fetchTimeoutMs: 5000, excludePattern: '[' });
+  assert(badPat.status === 'error' && badPat.error.code === 'bad-pattern', '非法正则应返回 bad-pattern');
   assert(orphanRows.some((p) => p.url.includes('/orphan')), `孤儿页应包含 /orphan，实际 ${orphanRows.map((p) => p.url).join(',')}`);
   const dupRows = site.pages.filter((p) => p.dupTitle);
   assert(dupRows.length >= 2, `应标记 >= 2 个重复标题页，实际 ${dupRows.length}`);

@@ -22,7 +22,7 @@ window.__ModuleLoader__.load({
     const LS_HISTORY = 'seo-wb-history';
     const LS_MODEL = 'seo-wb-model';
 
-    const DEFAULT_SETTINGS = { defaultSite: '', psiKey: '', timeoutMs: 15000, maxRedirects: 5, maxPages: 30 };
+    const DEFAULT_SETTINGS = { defaultSite: '', psiKey: '', timeoutMs: 15000, maxRedirects: 5, maxPages: 30, includePattern: '', excludePattern: '' };
 
     function lsGet(key, fallback) {
       try {
@@ -540,6 +540,9 @@ window.__ModuleLoader__.load({
           h('div', { className: 'seo-wb-kv' }, h('dt', null, 'robots.txt'), h('dd', { className: 'seo-wb-mono' }, robots.status ? `HTTP ${robots.status}${robots.disallowAll ? '（整站禁止抓取）' : ''}` : '未读取')),
           h('div', { className: 'seo-wb-kv' }, h('dt', null, 'sitemap'), h('dd', { className: 'seo-wb-mono' }, sitemap.urls && sitemap.urls.length ? `${sitemap.urls.length} 个 URL（${(sitemap.fetchedFrom || []).join('、')}）` : '未发现')),
           h('div', { className: 'seo-wb-kv' }, h('dt', null, '抓取上限'), h('dd', { className: 'seo-wb-mono' }, `${st.maxPages ?? '-'} 页（⚙ 设置里可调到 200）`)),
+          report.filters && (report.filters.includePattern || report.filters.excludePattern)
+            ? h('div', { className: 'seo-wb-kv' }, h('dt', null, '路径过滤'), h('dd', { className: 'seo-wb-mono' }, [report.filters.includePattern ? `只抓 ${report.filters.includePattern}` : null, report.filters.excludePattern ? `排除 ${report.filters.excludePattern}` : null].filter(Boolean).join('；')))
+            : null,
           h('div', { className: 'seo-wb-kv' }, h('dt', null, '抓取深度'), h('dd', { className: 'seo-wb-mono' }, `上限 ${st.maxDepth ?? '-'} 层`)),
           h('div', { className: 'seo-wb-kv' }, h('dt', null, '耗时'), h('dd', { className: 'seo-wb-mono' }, `${Math.round(report.durationMs || 0)}ms`)),
         ),
@@ -691,6 +694,8 @@ window.__ModuleLoader__.load({
       ['timeoutMs', '抓取超时（毫秒）', 'text', '默认 15000', '15000'],
       ['maxRedirects', '最大重定向数', 'text', '默认 5', '5'],
       ['maxPages', '站点体检最大页数', 'text', '单次抓取上限，默认 30（2–200）', '30'],
+      ['includePattern', '只抓这些路径（正则，可空）', 'text', '作用于站内链接的「路径+查询串」；例 ^/blog/ 只抓博客区；留空 = 全部', '^/blog/'],
+      ['excludePattern', '排除这些路径（正则，可空）', 'text', '跳过匹配的站内链接；例 ^/detail/ 跳过详情页（几万页也不会占满上限）；留空 = 不排除', '^/detail/'],
     ];
 
     function SettingsPanel({ open, saved, onClose, onSave }) {
@@ -871,6 +876,8 @@ window.__ModuleLoader__.load({
             fetchTimeoutMs: Number(settings.timeoutMs) || 15000,
             maxRedirects: Number(settings.maxRedirects) || 5,
             maxPages: Number(settings.maxPages) || 30,
+            includePattern: String(settings.includePattern || '').trim(),
+            excludePattern: String(settings.excludePattern || '').trim(),
           });
           if (data.status === 'error') throw new Error((data.error && data.error.message) || '站点体检失败');
           setReport(data);
