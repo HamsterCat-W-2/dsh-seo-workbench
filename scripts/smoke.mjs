@@ -16,6 +16,7 @@ import { buildSiteReport } from '../lib/site.js';
 import { runCrux } from '../lib/crux.js';
 import { runBingSearch } from '../lib/bing.js';
 import { buildAuthUrl } from '../lib/gsc.js';
+import { analyzeKeywords, joinSearchData } from '../lib/keywords.js';
 
 const PAGE = `<!doctype html>
 <html>
@@ -323,6 +324,25 @@ try {
   // ---- robots Crawl-delay parsing.
   const robotsCd = parseRobots('User-agent: *\nCrawl-delay: 2\nSitemap: https://example.com/sitemap.xml\n');
   assert(robotsCd.crawlDelay === 2 && robotsCd.sitemaps.length === 1 && !robotsCd.disallowAll, `robots Crawl-delay 解析错误：${JSON.stringify(robotsCd)}`);
+
+  // ---- keyword analysis on the SITE fixture (Chinese + latin terms).
+  const kw = await analyzeKeywords(`http://127.0.0.1:${port}/`, { maxPages: 12, maxDepth: 2 });
+  assert(kw.status === 'ok', `关键词分析应成功，实际 ${JSON.stringify(kw)}`);
+  assert((kw.keywords || []).length >= 5, `应提取至少 5 个关键词，实际 ${kw.keywords.length}`);
+  const kwZh = kw.keywords.find((k) => k.lang === 'zh' && k.pages >= 2);
+  assert(kwZh, '应存在覆盖 ≥2 页的中文关键词');
+  const kwJoined = joinSearchData(JSON.parse(JSON.stringify(kw)), {
+    status: 'ok',
+    queries: [
+      { query: kwZh.keyword, clicks: 5, impressions: 100, ctr: 5, position: 4 },
+      { query: 'xyzqwe123', clicks: 0, impressions: 60, ctr: 0, position: 30 },
+    ],
+  });
+  // The query may attach to the most specific keyword containing it (longest match),
+  // so assert on ANY keyword that received the joined search data.
+  const kwHit = kwJoined.keywords.find((k) => k.search && k.search.impressions === 100);
+  assert(kwHit, `搜索数据应合并进某个关键词（点击 5/展示 100），实际 ${JSON.stringify(kwJoined.keywords.map((k) => ({ k: k.keyword, s: k.search })))}`);
+  assert(kwJoined.unmatchedQueries.some((q) => q.query === 'xyzqwe123'), '应列出内容缺口查询');
 
   console.log('PASS smoke test');
   console.log(

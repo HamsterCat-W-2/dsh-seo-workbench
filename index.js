@@ -18,6 +18,7 @@
 
 import { runAudit, runPageSpeed } from './lib/engine.js';
 import { runLocalDeep } from './lib/localdeep.js';
+import { analyzeKeywords, joinSearchData } from './lib/keywords.js';
 import { crawlSite } from './lib/crawl.js';
 import { buildSiteReport } from './lib/site.js';
 import { runCrux } from './lib/crux.js';
@@ -222,6 +223,38 @@ export function apply(ctx, config = {}) {
         }),
       }),
     'seo-workbench: site-audit route',
+  );
+
+  // POST /api/keywords — crawl the site (same machinery as site-audit) and
+  // extract real keyword data from the pages' own content: CJK/latin term
+  // frequency, density, page coverage, title/H1/description hits, best
+  // targeting page, cannibalization clusters (≥2 pages on one keyword) and
+  // content gaps. When the client has GSC/Bing query data it is joined here so
+  // each keyword carries real clicks/impressions/CTR/position (body.searchQueries).
+  ctx.effect(
+    () =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path: `${API}keywords`,
+        handler: createUrlHandler(async (url, body) => {
+          const report = await analyzeKeywords(url, {
+            maxPages: clampInt(body && body.maxPages, 2, 200, 50),
+            maxDepth: clampInt(body && body.maxDepth, 1, 10, 3),
+            concurrency: clampInt(body && body.concurrency, 1, 8, 4),
+            fetchTimeoutMs: clampInt(body && body.fetchTimeoutMs, 1000, 60000, baseAuditOptions.timeoutMs),
+            maxRedirects: clampInt(body && body.maxRedirects, 0, 10, baseAuditOptions.maxRedirects),
+            userAgent: baseAuditOptions.userAgent,
+            includePattern: body && typeof body.includePattern === 'string' ? body.includePattern : (config && config.includePattern) || '',
+            excludePattern: body && typeof body.excludePattern === 'string' ? body.excludePattern : (config && config.excludePattern) || '',
+            pathQuotas: body && typeof body.pathQuotas === 'string' ? body.pathQuotas : (config && config.pathQuotas) || '',
+          });
+          if (report.status === 'error') return report;
+          const queries = Array.isArray(body && body.searchQueries) ? body.searchQueries : [];
+          if (queries.length) return joinSearchData(report, { status: 'ok', queries });
+          return report;
+        }),
+      }),
+    'seo-workbench: keywords route',
   );
 
   // POST /api/deep — measure real Core Web Vitals:

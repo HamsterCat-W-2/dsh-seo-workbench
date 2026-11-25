@@ -33,7 +33,12 @@ A DeepSeek Harness plugin that runs technical SEO audits of websites from a dedi
    the same host, respects `Disallow`, and is bounded by the page cap. It reports a 站点概览
    (pages fetched/failed/skipped, dead links, sitemap size), a per-page table with flags
    (thin content, missing title/description/H1/canonical, duplicate title/description, orphan,
-   failed), and a 4-group site score (可索引性 / On-Page / 内容质量 / 站点结构).
+   failed), and a 4-group site score (可索引性 / On-Page / 内容质量 / 站点结构). The 站点体检
+   tab set adds a **关键词** tab: click 分析关键词 to crawl the site and compute REAL in-site
+   keyword data (频次 / 密度 / 覆盖页数 / 标题·H1·描述命中) plus **自相残杀** (multiple pages
+   fighting the same keyword) and **内容缺口** (queries with impressions but no covering
+   content, from GSC/Bing when search data was fetched first). No external search-volume API
+   is used — volume numbers are never fabricated.
 8. **分析历史** keeps the last 20 audits (localStorage); click a row to restore its report,
    delete a single row, or clear all. 深度检测 / AI 建议 / 字段数据（CrUX）/ 搜索数据
    (GSC/Bing) results are saved into the same entry — badges `深度` / `AI` / `字段` / `搜索`
@@ -149,6 +154,7 @@ measured by a lab run; the card shows `—` locally. Chrome is launched with `--
 | `lib/score.js` | Weighted scoring |
 | `lib/crawl.js` | 站点体检 BFS crawler (robots-respecting, same-host, bounded) |
 | `lib/site.js` | Cross-page aggregation → site report |
+| `lib/keywords.js` | 关键词分析: in-site crawl + frequency/density/coverage + cannibalization + content gaps + GSC/Bing join |
 | `lib/localdeep.js` | Local Chrome (CDP) CWV measurement for the deep check |
 | `lib/crux.js` | Chrome UX Report field CWV (p75, 28 days) |
 | `lib/bing.js` | Bing Webmaster search data (clicks/impressions/rank) |

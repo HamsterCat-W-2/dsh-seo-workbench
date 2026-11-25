@@ -183,7 +183,7 @@ window.__ModuleLoader__.load({
       textarea.remove();
     }
 
-    function buildMarkdown(report, deep, adviceText, cruxOk, searchOk) {
+    function buildMarkdown(report, deep, adviceText, cruxOk, searchOk, keywordsOk) {
       const L = [];
       L.push(report.mode === 'site' ? `# SEO 站点体检报告 — ${domainOf(report.url)}` : `# SEO 分析报告 — ${report.url}`);
       L.push('');
@@ -320,6 +320,35 @@ window.__ModuleLoader__.load({
           for (const q of sr.queries.slice(0, 10)) {
             L.push(`| ${q.query || '-'} | ${q.clicks ?? '-'} | ${q.impressions ?? '-'} | ${q.position ?? q.rank ?? '-'} |`);
           }
+        }
+        L.push('');
+      }
+      if (keywordsOk && keywordsOk.keywords && keywordsOk.keywords.length) {
+        L.push('## 关键词分析（站内词频）');
+        L.push('');
+        L.push(`> 抓取 ${keywordsOk.stats.pages} 页 · 提取 ${keywordsOk.keywords.length} 个关键词 · 真实词频数据，非外部搜索量`);
+        L.push('');
+        L.push('| 关键词 | 语言 | 频次 | 密度 | 覆盖页 | 标题 | H1 | 搜索点击 | 搜索展示 | 排名 |');
+        L.push('| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |');
+        for (const k of keywordsOk.keywords.slice(0, 20)) {
+          const s = k.search;
+          L.push(`| ${k.keyword} | ${k.lang} | ${k.count} | ${k.density}% | ${k.pages} | ${k.titleHits} | ${k.h1Hits} | ${s ? s.clicks : '-'} | ${s ? s.impressions : '-'} | ${s ? s.position : '-'} |`);
+        }
+        L.push('');
+      }
+      if (keywordsOk && (keywordsOk.clusters || []).length) {
+        L.push('## 关键词自相残杀');
+        L.push('');
+        for (const c of keywordsOk.clusters) {
+          L.push(`- **${c.keyword}**：${c.pages.map((pg) => `${pg.url}（${pg.source}）`).join('、')}`);
+        }
+        L.push('');
+      }
+      if (keywordsOk && (keywordsOk.unmatchedQueries || []).length) {
+        L.push('## 内容缺口（有展示未覆盖的查询）');
+        L.push('');
+        for (const q of keywordsOk.unmatchedQueries) {
+          L.push(`- ${q.query}（展示 ${q.impressions}，点击 ${q.clicks}，排名 ${q.position}）`);
         }
         L.push('');
       }
@@ -627,6 +656,120 @@ window.__ModuleLoader__.load({
               ),
             )
           : null,
+      );
+    }
+
+    function KeywordsSection({ keywords, onRun, report }) {
+      const data = keywords && keywords.data;
+      const loading = keywords && keywords.loading;
+      const err = keywords && keywords.error;
+      const rows = (data && data.keywords) || [];
+      const clusters = (data && data.clusters) || [];
+      const unmatched = (data && data.unmatchedQueries) || [];
+      const se = (k) => {
+        const s = k.search;
+        return s ? `${s.clicks} 点 / ${s.impressions} 展 / 排名 ${s.position}` : null;
+      };
+      return h(
+        'div',
+        { className: 'seo-wb-panel seo-wb-kw-panel' },
+        h(
+          'div',
+          { className: 'seo-wb-panel-head' },
+          h('div', { className: 'seo-wb-section-title' }, '关键词分析'),
+          h('span', { className: 'seo-wb-chip' }, '站内真实词频 · 非外部搜索量'),
+          h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-mini', onClick: onRun, disabled: !!loading || !report }, loading ? '分析中…' : '分析关键词'),
+        ),
+        loading ? h(Spinner, { label: '抓取页面并提取关键词…' }) : null,
+        err ? h('div', { className: 'seo-wb-error', role: 'alert' }, err) : null,
+        data
+          ? h(
+              'div',
+              { className: 'seo-wb-kw-body' },
+              h(
+                'div',
+                { className: 'seo-wb-kw-stats' },
+                h('div', { className: 'seo-wb-kw-stat' }, `${(data.stats && data.stats.pages) || 0} 页`),
+                h('div', { className: 'seo-wb-kw-stat' }, `${rows.length} 个关键词`),
+                h('div', { className: 'seo-wb-kw-stat' }, `${clusters.length} 组自相残杀`),
+                h('div', { className: 'seo-wb-kw-stat' }, `${unmatched.length} 条内容缺口`),
+              ),
+              (data.notes || []).length
+                ? h(
+                    'div',
+                    { className: 'seo-wb-notes' },
+                    (data.notes || []).map((n, idx) => h('div', { key: idx, className: 'seo-wb-note' }, `· ${n}`)),
+                  )
+                : null,
+              rows.length
+                ? h(
+                    'div',
+                    { className: 'seo-wb-kw-block' },
+                    h('div', { className: 'seo-wb-pages-head' }, 'Top 关键词'),
+                    h(
+                      'div',
+                      { className: 'seo-wb-kw-table' },
+                      h(
+                        'div',
+                        { className: 'seo-wb-kw-row seo-wb-kw-head' },
+                        h('span', null, '关键词'),
+                        h('span', null, '频次'),
+                        h('span', null, '密度'),
+                        h('span', null, '覆盖页'),
+                        h('span', null, '标题'),
+                        h('span', null, 'H1'),
+                        h('span', null, '搜索数据'),
+                      ),
+                      rows.slice(0, 30).map((k) =>
+                        h(
+                          'div',
+                          { key: k.keyword, className: 'seo-wb-kw-row' },
+                          h('span', { className: 'seo-wb-kw-word' }, `${k.keyword}${k.lang === 'en' ? ' (en)' : ''}`),
+                          h('span', null, String(k.count)),
+                          h('span', null, `${k.density}%`),
+                          h('span', null, String(k.pages)),
+                          h('span', null, String(k.titleHits)),
+                          h('span', null, String(k.h1Hits)),
+                          h('span', { className: k.search ? 'seo-wb-kw-search' : 'seo-wb-muted' }, se(k) || '—'),
+                        ),
+                      ),
+                    ),
+                  )
+                : null,
+              clusters.length
+                ? h(
+                    'div',
+                    { className: 'seo-wb-kw-block' },
+                    h('div', { className: 'seo-wb-pages-head' }, '关键词自相残杀（多页抢同一词）'),
+                    clusters.map((c) =>
+                      h(
+                        'div',
+                        { key: c.keyword, className: 'seo-wb-kw-cluster' },
+                        h('div', { className: 'seo-wb-kw-word' }, c.keyword),
+                        c.pages.map((pg) => h('div', { key: pg.url, className: 'seo-wb-kw-cluster-page' }, `${pg.url}（${pg.source}）`)),
+                      ),
+                    ),
+                  )
+                : null,
+              unmatched.length
+                ? h(
+                    'div',
+                    { className: 'seo-wb-kw-block' },
+                    h('div', { className: 'seo-wb-pages-head' }, '内容缺口（有展示但内容未覆盖的查询）'),
+                    unmatched.map((q) =>
+                      h(
+                        'div',
+                        { key: q.query, className: 'seo-wb-kw-gap' },
+                        h('span', { className: 'seo-wb-kw-word' }, q.query),
+                        h('span', { className: 'seo-wb-muted' }, `展示 ${q.impressions} · 点击 ${q.clicks} · 排名 ${q.position}`),
+                      ),
+                    ),
+                  )
+                : null,
+            )
+          : !loading && !err
+            ? h('div', { className: 'seo-wb-empty' }, '点「分析关键词」抓取页面并提取关键词（建议先做一次站点体检）')
+            : null,
       );
     }
 
@@ -1062,6 +1205,7 @@ window.__ModuleLoader__.load({
       const [report, setReport] = useState(null);
       const [deep, setDeep] = useState(null);
       const [advice, setAdvice] = useState({ loading: false, text: '', error: null });
+      const [keywords, setKeywords] = useState({ loading: false, error: null, data: null });
       const [crux, setCrux] = useState(null); // {loading} | {status:'ok',data:{...}} | {status:'error',error}
       const [search, setSearch] = useState({ provider: 'gsc', loading: false, result: null, error: null, code: '', status: '' });
       const [gscToken, setGscToken] = useState(() => lsGet(LS_GSC, {}));
@@ -1154,6 +1298,7 @@ window.__ModuleLoader__.load({
           setReport(data);
           setDeep(null);
           setCrux(null);
+          setKeywords({ loading: false, error: null, data: null });
           setSearch((s) => ({ ...s, result: null, error: null, status: '', code: '' }));
           setAdvice({ loading: false, text: '', error: null });
           setTab('issues');
@@ -1170,6 +1315,7 @@ window.__ModuleLoader__.load({
             advice: null,
             crux: null,
             search: null,
+            keywords: null,
           });
         } catch (err) {
           setError(err.message || String(err));
@@ -1200,6 +1346,7 @@ window.__ModuleLoader__.load({
           setReport(data);
           setDeep(null);
           setCrux(null);
+          setKeywords({ loading: false, error: null, data: null });
           setSearch((s) => ({ ...s, result: null, error: null, status: '', code: '' }));
           setAdvice({ loading: false, text: '', error: null });
           setTab('issues');
@@ -1217,6 +1364,7 @@ window.__ModuleLoader__.load({
             advice: null,
             crux: null,
             search: null,
+            keywords: null,
           });
         } catch (err) {
           setError(err.message || String(err));
@@ -1421,6 +1569,31 @@ window.__ModuleLoader__.load({
         }
       }
 
+      async function runKeywords() {
+        if (!report) return;
+        setKeywords({ loading: true, error: null, data: null });
+        try {
+          const searchQueries = search && search.result && search.result.status === 'ok' ? search.result.queries || [] : [];
+          const data = await postJson('/seo-workbench/api/keywords', {
+            url: report.url,
+            maxPages: Number(settings.maxPages) || 50,
+            includePattern: (settings.includePattern || '').trim(),
+            excludePattern: (settings.excludePattern || '').trim(),
+            pathQuotas: settings.pathQuotas || '',
+            searchQueries,
+          });
+          if (data.status !== 'ok') {
+            setKeywords({ loading: false, error: (data.error && data.error.message) || '关键词分析失败', data: null });
+          } else {
+            setKeywords({ loading: false, error: null, data });
+            const entryId = reportEntryId(report);
+            if (entryId) patchHistory(entryId, { keywords: data });
+          }
+        } catch (err) {
+          setKeywords({ loading: false, error: err.message || String(err), data: null });
+        }
+      }
+
       function removeHistory(id) {
         setHistory((prev) => prev.filter((x) => x.id !== id));
       }
@@ -1430,6 +1603,7 @@ window.__ModuleLoader__.load({
         setReport(entry.report);
         setDeep(entry.deep || null);
         setCrux(entry.crux || null);
+        setKeywords({ loading: false, error: null, data: entry.keywords || null });
         setSearch({
           provider: (entry.search && entry.search.provider) || 'gsc',
           loading: false,
@@ -1447,11 +1621,11 @@ window.__ModuleLoader__.load({
       }
       function exportMd() {
         if (!report) return;
-        downloadText(`seo-report-${domainOf(report.url)}-${new Date().toISOString().slice(0, 10)}.md`, buildMarkdown(report, deep, advice.text, cruxOk, searchOk));
+        downloadText(`seo-report-${domainOf(report.url)}-${new Date().toISOString().slice(0, 10)}.md`, buildMarkdown(report, deep, advice.text, cruxOk, searchOk, keywordsOk));
       }
       function copyMd() {
         if (!report) return;
-        copyText(buildMarkdown(report, deep, advice.text, cruxOk, searchOk));
+        copyText(buildMarkdown(report, deep, advice.text, cruxOk, searchOk, keywordsOk));
         setCopied('md');
         setTimeout(() => setCopied(null), 1500);
       }
@@ -1470,9 +1644,10 @@ window.__ModuleLoader__.load({
 
       const cruxOk = crux && crux.status === 'ok' && crux.data ? crux : null;
       const searchOk = search && search.result && search.result.status === 'ok' ? { result: search.result } : null;
+      const keywordsOk = keywords && keywords.data && keywords.data.status === 'ok' ? keywords.data : null;
       const issueCount = report && report.issues ? report.issues.length : 0;
       const isSiteReport = report && report.mode === 'site';
-      const tabLabel = (id) => (id === 'issues' ? `问题（${issueCount}）` : id === 'details' ? '检查明细' : id === 'overview' ? (isSiteReport ? '站点概览' : '页面概况') : 'AI 建议');
+      const tabLabel = (id) => (id === 'issues' ? `问题（${issueCount}）` : id === 'details' ? '检查明细' : id === 'overview' ? (isSiteReport ? '站点概览' : '页面概况') : id === 'keywords' ? '关键词' : 'AI 建议');
 
       return h(
         'div',
@@ -1610,7 +1785,7 @@ window.__ModuleLoader__.load({
               h(
                 'div',
                 { className: 'seo-wb-tabs', role: 'tablist' },
-                ['issues', 'details', 'overview', 'advice'].map((id) =>
+                (isSiteReport ? ['issues', 'details', 'overview', 'keywords', 'advice'] : ['issues', 'details', 'overview', 'advice']).map((id) =>
                   h(
                     'button',
                     {
@@ -1631,7 +1806,9 @@ window.__ModuleLoader__.load({
                   ? h(DetailsSection, { groups: report.groups, openGroup, setOpenGroup })
                   : tab === 'overview'
                     ? (isSiteReport ? h(SiteOverviewSection, { report }) : h(OverviewSection, { report }))
-                    : h(
+                    : tab === 'keywords'
+                      ? h(KeywordsSection, { keywords, onRun: runKeywords, report })
+                      : h(
                         'div',
                         { className: 'seo-wb-advice' },
                         advice.loading ? h(Spinner, { label: '模型思考中…' }) : null,
@@ -1712,6 +1889,9 @@ window.__ModuleLoader__.load({
                             : null,
                           entry.search && entry.search.result
                             ? h('span', { className: 'seo-wb-history-badge seo-wb-badge-search', title: '已保存搜索数据' }, '搜索')
+                            : null,
+                          entry.keywords && entry.keywords.status === 'ok'
+                            ? h('span', { className: 'seo-wb-history-badge seo-wb-badge-keywords', title: '已保存关键词分析' }, '关键词')
                             : null,
                         ),
                         entry.score !== undefined && entry.score !== null
@@ -1926,6 +2106,22 @@ window.__ModuleLoader__.load({
 .seo-wb-badge-site { color: var(--dsw-alias-state-warn-primary); background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 12%, transparent); }
 .seo-wb-badge-crux { color: var(--dsw-alias-state-success-primary); background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 12%, transparent); }
 .seo-wb-badge-search { color: var(--dsw-alias-brand-primary); background: color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent); }
+.seo-wb-badge-keywords { color: var(--dsw-alias-state-warn-primary); background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 12%, transparent); }
+.seo-wb-kw-panel { margin-top: 24px; }
+.seo-wb-kw-body { display: flex; flex-direction: column; gap: 14px; }
+.seo-wb-kw-stats { display: flex; flex-wrap: wrap; gap: 8px; }
+.seo-wb-kw-stat { font-size: 12px; color: var(--dsw-alias-label-secondary); background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; padding: 6px 10px; }
+.seo-wb-kw-block { display: flex; flex-direction: column; gap: 8px; }
+.seo-wb-kw-table { display: flex; flex-direction: column; border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; overflow: hidden; }
+.seo-wb-kw-row { display: grid; grid-template-columns: minmax(140px, 2fr) 48px 64px 56px 48px 44px minmax(120px, 1.4fr); gap: 8px; padding: 7px 10px; font-size: 12.5px; border-bottom: 1px solid var(--dsw-alias-border-l1); align-items: center; }
+.seo-wb-kw-row:last-child { border-bottom: none; }
+.seo-wb-kw-head { color: var(--dsw-alias-label-secondary); font-size: 11.5px; background: var(--dsw-alias-bg-layer-1); }
+.seo-wb-kw-word { font-weight: 600; color: var(--dsw-alias-label-primary); word-break: break-all; }
+.seo-wb-kw-search { color: var(--dsw-alias-state-success-primary); }
+.seo-wb-muted { color: var(--dsw-alias-label-secondary); }
+.seo-wb-kw-cluster { display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; padding: 8px 10px; }
+.seo-wb-kw-cluster-page { font-size: 12px; color: var(--dsw-alias-label-secondary); word-break: break-all; }
+.seo-wb-kw-gap { display: flex; gap: 8px; align-items: baseline; justify-content: space-between; border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; padding: 6px 10px; }
 .seo-wb-search-panel { margin-top: 24px; }
 .seo-wb-search-body { display: flex; flex-direction: column; gap: 10px; }
 .seo-wb-search-row { display: flex; gap: 8px; }
