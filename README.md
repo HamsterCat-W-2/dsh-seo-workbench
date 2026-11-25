@@ -35,8 +35,9 @@ A DeepSeek Harness plugin that runs technical SEO audits of websites from a dedi
    (thin content, missing title/description/H1/canonical, duplicate title/description, orphan,
    failed), and a 4-group site score (可索引性 / On-Page / 内容质量 / 站点结构).
 8. **分析历史** keeps the last 20 audits (localStorage); click a row to restore its report,
-   delete a single row, or clear all. 深度检测 and AI 建议 results are saved into the same
-   entry — badges `深度` / `AI` / `站点` mark which ones the entry already has.
+   delete a single row, or clear all. 深度检测 / AI 建议 / 字段数据（CrUX）/ 搜索数据
+   (GSC/Bing) results are saved into the same entry — badges `深度` / `AI` / `字段` / `搜索`
+   / `站点` mark which ones the entry already has.
 9. **⚙ 设置** configures a default site (prefills the input), a PageSpeed API Key, the fetch
    timeout, the max redirect count, the 站点体检 page cap (maxPages), two optional path
    filters for the crawl (**只抓这些路径** `includePattern` / **排除这些路径**
