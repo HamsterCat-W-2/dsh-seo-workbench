@@ -1338,6 +1338,15 @@ window.__ModuleLoader__.load({
       const [settings, setSettings] = useState(() => ({ ...DEFAULT_SETTINGS, ...lsGet(LS_SETTINGS, {}) }));
       const [history, setHistory] = useState(() => lsGet(LS_HISTORY, []));
       const [historyOpen, setHistoryOpen] = useState(true);
+      const [collapsedProjects, setCollapsedProjects] = useState(() => new Set());
+      const toggleProject = (key) => {
+        setCollapsedProjects((prev) => {
+          const next = new Set(prev);
+          if (next.has(key)) next.delete(key);
+          else next.add(key);
+          return next;
+        });
+      };
       const [models, setModels] = useState({ providers: [] });
       const [modelSel, setModelSel] = useState(() => lsGet(LS_MODEL, '') || '');
 
@@ -1388,7 +1397,21 @@ window.__ModuleLoader__.load({
       }, [busy]);
 
       function pushHistory(entry) {
-        setHistory((prev) => [entry, ...prev.filter((x) => x.id !== entry.id)].slice(0, 20));
+        setHistory((prev) => {
+          const next = [entry, ...prev.filter((x) => x.id !== entry.id)];
+          // History is grouped as projects (one per site): newest 10 runs per site,
+          // 100 runs total as a safety cap.
+          const perSite = new Map();
+          const kept = [];
+          for (const item of next) {
+            const site = domainOf(item.url) || item.url;
+            const seen = perSite.get(site) || 0;
+            if (seen >= 10) continue;
+            perSite.set(site, seen + 1);
+            kept.push(item);
+          }
+          return kept.slice(0, 100);
+        });
       }
       // Deep-check and AI advice complete AFTER the audit created the entry, so
       // they are merged into the stored entry by its id instead of creating a new one.
@@ -1832,6 +1855,15 @@ window.__ModuleLoader__.load({
       const keywordsOk = keywords && keywords.data && keywords.data.status === 'ok' ? keywords.data : null;
       const issueCount = report && report.issues ? report.issues.length : 0;
       const isSiteReport = report && report.mode === 'site';
+      const historyGroups = (() => {
+        const map = new Map();
+        for (const entry of history) {
+          const key = domainOf(entry.url) || entry.url;
+          if (!map.has(key)) map.set(key, { key, entries: [] });
+          map.get(key).entries.push(entry);
+        }
+        return [...map.values()];
+      })();
       const tabLabel = (id) => (id === 'issues' ? `问题（${issueCount}）` : id === 'details' ? '检查明细' : id === 'overview' ? (isSiteReport ? '站点概览' : '页面概况') : id === 'keywords' ? '关键词' : id === 'search' ? '搜索数据' : id === 'index' ? '索引状态' : id === 'perf' ? '性能检测' : 'AI 建议');
 
       return h(
@@ -2075,45 +2107,69 @@ window.__ModuleLoader__.load({
                 ? h(
                     'div',
                     { className: 'seo-wb-history-list' },
-                    history.map((entry) =>
+                    historyGroups.map((group) =>
                       h(
                         'div',
-                        { key: entry.id, className: 'seo-wb-history-row' },
+                        { key: group.key, className: 'seo-wb-project' },
                         h(
                           'button',
-                          { type: 'button', className: 'seo-wb-history-main', onClick: () => openHistory(entry) },
-                          h('span', { className: 'seo-wb-history-domain' }, domainOf(entry.url)),
-                          h('span', { className: 'seo-wb-history-time' }, fmtTime(entry.fetchedAt)),
-                          entry.mode === 'site'
-                            ? h('span', { className: 'seo-wb-history-badge seo-wb-badge-site', title: '站点体检报告' }, '站点')
-                            : null,
-                          entry.deep && entry.deep.status === 'ok'
-                            ? h('span', { className: 'seo-wb-history-badge seo-wb-badge-deep', title: '已保存深度检测（CWV）结果' }, '深度')
-                            : null,
-                          entry.advice && entry.advice.text
-                            ? h('span', { className: 'seo-wb-history-badge seo-wb-badge-advice', title: '已保存 AI 建议' }, 'AI')
-                            : null,
-                          entry.crux && entry.crux.status === 'ok' && entry.crux.data && entry.crux.data.hasData
-                            ? h('span', { className: 'seo-wb-history-badge seo-wb-badge-crux', title: '已保存字段数据（CrUX）' }, '字段')
-                            : null,
-                          entry.search && entry.search.result
-                            ? h('span', { className: 'seo-wb-history-badge seo-wb-badge-search', title: '已保存搜索数据' }, '搜索')
-                            : null,
-                          entry.keywords && entry.keywords.status === 'ok'
-                            ? h('span', { className: 'seo-wb-history-badge seo-wb-badge-keywords', title: '已保存关键词分析' }, '关键词')
-                            : null,
-                          entry.index
-                            ? h('span', { className: 'seo-wb-history-badge seo-wb-badge-index', title: '已保存索引状态（GSC）' }, '索引')
-                            : null,
+                          {
+                            type: 'button',
+                            className: 'seo-wb-project-head',
+                            onClick: () => toggleProject(group.key),
+                            'aria-expanded': !collapsedProjects.has(group.key),
+                          },
+                          h('span', { className: 'seo-wb-project-chevron' }, collapsedProjects.has(group.key) ? '▸' : '▾'),
+                          h('span', { className: 'seo-wb-project-name' }, group.key),
+                          h('span', { className: 'seo-wb-project-count' }, `${group.entries.length} 条`),
                         ),
-                        entry.score !== undefined && entry.score !== null
-                          ? h('span', { className: `seo-wb-score-chip seo-wb-score-chip-${scoreColor(entry.score)}` }, String(Math.round(entry.score)))
-                          : null,
-                        h(
-                          'button',
-                          { type: 'button', className: 'seo-wb-history-del', onClick: () => removeHistory(entry.id), 'aria-label': `删除 ${entry.url}` },
-                          '✕',
-                        ),
+                        collapsedProjects.has(group.key)
+                          ? null
+                          : h(
+                              'div',
+                              { className: 'seo-wb-project-entries' },
+                              group.entries.map((entry) =>
+                                h(
+                                  'div',
+                                  { key: entry.id, className: 'seo-wb-history-row' },
+                                  h(
+                                    'button',
+                                    { type: 'button', className: 'seo-wb-history-main', onClick: () => openHistory(entry) },
+                                    h('span', { className: 'seo-wb-history-domain' }, domainOf(entry.url)),
+                                    h('span', { className: 'seo-wb-history-time' }, fmtTime(entry.fetchedAt)),
+                                    entry.mode === 'site'
+                                      ? h('span', { className: 'seo-wb-history-badge seo-wb-badge-site', title: '站点体检报告' }, '站点')
+                                      : null,
+                                    entry.deep && entry.deep.status === 'ok'
+                                      ? h('span', { className: 'seo-wb-history-badge seo-wb-badge-deep', title: '已保存深度检测（CWV）结果' }, '深度')
+                                      : null,
+                                    entry.advice && entry.advice.text
+                                      ? h('span', { className: 'seo-wb-history-badge seo-wb-badge-advice', title: '已保存 AI 建议' }, 'AI')
+                                      : null,
+                                    entry.crux && entry.crux.status === 'ok' && entry.crux.data && entry.crux.data.hasData
+                                      ? h('span', { className: 'seo-wb-history-badge seo-wb-badge-crux', title: '已保存字段数据（CrUX）' }, '字段')
+                                      : null,
+                                    entry.search && entry.search.result
+                                      ? h('span', { className: 'seo-wb-history-badge seo-wb-badge-search', title: '已保存搜索数据' }, '搜索')
+                                      : null,
+                                    entry.keywords && entry.keywords.status === 'ok'
+                                      ? h('span', { className: 'seo-wb-history-badge seo-wb-badge-keywords', title: '已保存关键词分析' }, '关键词')
+                                      : null,
+                                    entry.index
+                                      ? h('span', { className: 'seo-wb-history-badge seo-wb-badge-index', title: '已保存索引状态（GSC）' }, '索引')
+                                      : null,
+                                  ),
+                                  entry.score !== undefined && entry.score !== null
+                                    ? h('span', { className: `seo-wb-score-chip seo-wb-score-chip-${scoreColor(entry.score)}` }, String(Math.round(entry.score)))
+                                    : null,
+                                  h(
+                                    'button',
+                                    { type: 'button', className: 'seo-wb-history-del', onClick: () => removeHistory(entry.id), 'aria-label': `删除 ${entry.url}` },
+                                    '✕',
+                                  ),
+                                ),
+                              ),
+                            ),
                       ),
                     ),
                   )
@@ -2182,6 +2238,14 @@ window.__ModuleLoader__.load({
 .seo-wb-tab:hover { background: var(--dsw-alias-bg-layer-2); }
 .seo-wb-tab-active { color: var(--dsw-alias-label-primary); font-weight: 600; border-bottom-color: var(--dsw-alias-brand-primary); }
 .seo-wb-tabs { flex-wrap: wrap; }
+.seo-wb-project { border: 1px solid var(--dsw-alias-border-l1); border-radius: 10px; overflow: hidden; }
+.seo-wb-project + .seo-wb-project { margin-top: 8px; }
+.seo-wb-project-head { width: 100%; display: flex; align-items: center; gap: 8px; padding: 9px 12px; border: 0; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); font-family: inherit; font-size: 13px; font-weight: 600; cursor: pointer; text-align: left; }
+.seo-wb-project-head:hover { background: var(--dsw-alias-bg-layer-1); }
+.seo-wb-project-chevron { color: var(--dsw-alias-label-secondary); font-size: 11px; width: 12px; flex-shrink: 0; }
+.seo-wb-project-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.seo-wb-project-count { color: var(--dsw-alias-label-secondary); font-weight: 400; font-size: 12px; }
+.seo-wb-project-entries { border-top: 1px solid var(--dsw-alias-border-l1); }
 .seo-wb-perf { display: flex; flex-direction: column; gap: 16px; margin-top: 16px; }
 .seo-wb-issues, .seo-wb-details { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
 .seo-wb-issue, .seo-wb-group { background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l1); border-radius: 10px; overflow: hidden; }
