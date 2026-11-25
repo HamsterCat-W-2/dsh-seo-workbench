@@ -183,7 +183,7 @@ window.__ModuleLoader__.load({
       textarea.remove();
     }
 
-    function buildMarkdown(report, deep, adviceText, cruxOk) {
+    function buildMarkdown(report, deep, adviceText, cruxOk, searchOk) {
       const L = [];
       L.push(report.mode === 'site' ? `# SEO 站点体检报告 — ${domainOf(report.url)}` : `# SEO 分析报告 — ${report.url}`);
       L.push('');
@@ -296,6 +296,31 @@ window.__ModuleLoader__.load({
         if (typeof c.fcpMs === 'number') parts.push(`FCP ${Math.round(c.fcpMs)}ms`);
         if (typeof c.ttfbMs === 'number') parts.push(`TTFB ${Math.round(c.ttfbMs)}ms`);
         if (parts.length) L.push(`- ${parts.join(' / ')}`);
+        L.push('');
+      }
+      if (searchOk && searchOk.result && searchOk.result.status === 'ok') {
+        const sr = searchOk.result;
+        L.push(`## 搜索数据（${sr.source === 'bing' ? '必应 Webmaster' : 'Google Search Console'}）`);
+        L.push('');
+        if (sr.period) L.push(`- 统计区间：${sr.period.start} ~ ${sr.period.end}`);
+        if (sr.siteUrl) L.push(`- 站点：${sr.siteUrl}`);
+        if (sr.totals) {
+          const t = sr.totals;
+          const parts = [];
+          if (t.clicks != null) parts.push(`点击 ${t.clicks}`);
+          if (t.impressions != null) parts.push(`展示 ${t.impressions}`);
+          if (t.avgCtr != null) parts.push(`CTR ${t.avgCtr}%`);
+          if (t.avgPosition != null) parts.push(`排名 ${t.avgPosition}`);
+          if (parts.length) L.push(`- ${parts.join(' / ')}`);
+        }
+        if ((sr.queries || []).length) {
+          L.push('');
+          L.push('| 查询词 | 点击 | 展示 | 排名 |');
+          L.push('| --- | --- | --- | --- |');
+          for (const q of sr.queries.slice(0, 10)) {
+            L.push(`| ${q.query || '-'} | ${q.clicks ?? '-'} | ${q.impressions ?? '-'} | ${q.position ?? q.rank ?? '-'} |`);
+          }
+        }
         L.push('');
       }
       if (adviceText) {
@@ -1129,6 +1154,7 @@ window.__ModuleLoader__.load({
           setReport(data);
           setDeep(null);
           setCrux(null);
+          setSearch((s) => ({ ...s, result: null, error: null, status: '', code: '' }));
           setAdvice({ loading: false, text: '', error: null });
           setTab('issues');
           setOpenIssue(null);
@@ -1142,6 +1168,8 @@ window.__ModuleLoader__.load({
             report: data,
             deep: null,
             advice: null,
+            crux: null,
+            search: null,
           });
         } catch (err) {
           setError(err.message || String(err));
@@ -1172,6 +1200,7 @@ window.__ModuleLoader__.load({
           setReport(data);
           setDeep(null);
           setCrux(null);
+          setSearch((s) => ({ ...s, result: null, error: null, status: '', code: '' }));
           setAdvice({ loading: false, text: '', error: null });
           setTab('issues');
           setOpenIssue(null);
@@ -1186,6 +1215,8 @@ window.__ModuleLoader__.load({
             report: data,
             deep: null,
             advice: null,
+            crux: null,
+            search: null,
           });
         } catch (err) {
           setError(err.message || String(err));
@@ -1264,6 +1295,8 @@ window.__ModuleLoader__.load({
             setCrux({ status: 'error', error: (data && data.error) || { message: 'CrUX 查询失败' } });
           } else {
             setCrux({ status: 'ok', data });
+            const entryId = reportEntryId(report);
+            if (entryId) patchHistory(entryId, { crux: { status: 'ok', data } });
           }
         } catch (err) {
           setCrux({ status: 'error', error: { message: err.message || String(err) } });
@@ -1365,6 +1398,8 @@ window.__ModuleLoader__.load({
               setSearch((s) => ({ ...s, loading: false, result: null, error: mapSearchError(data.error) }));
             } else {
               setSearch((s) => ({ ...s, loading: false, result: data }));
+              const entryId = reportEntryId(report);
+              if (entryId) patchHistory(entryId, { search: { provider: 'gsc', result: data } });
             }
           } catch (err) {
             setSearch((s) => ({ ...s, loading: false, result: null, error: err.message || String(err) }));
@@ -1378,6 +1413,8 @@ window.__ModuleLoader__.load({
             setSearch((s) => ({ ...s, loading: false, result: null, error: mapSearchError(data.error) }));
           } else {
             setSearch((s) => ({ ...s, loading: false, result: data }));
+            const entryId = reportEntryId(report);
+            if (entryId) patchHistory(entryId, { search: { provider: 'bing', result: data } });
           }
         } catch (err) {
           setSearch((s) => ({ ...s, loading: false, result: null, error: err.message || String(err) }));
@@ -1392,7 +1429,16 @@ window.__ModuleLoader__.load({
         setMode(entry.mode || 'page');
         setReport(entry.report);
         setDeep(entry.deep || null);
-        setCrux(null);
+        setCrux(entry.crux || null);
+        setSearch({
+          provider: (entry.search && entry.search.provider) || 'gsc',
+          loading: false,
+          result: (entry.search && entry.search.result) || null,
+          error: null,
+          code: '',
+          status: '',
+        });
+        setSearchUrl(entry.url);
         setAdvice({ loading: false, text: (entry.advice && entry.advice.text) || '', error: null });
         setTab('issues');
         setOpenIssue(null);
@@ -1401,11 +1447,11 @@ window.__ModuleLoader__.load({
       }
       function exportMd() {
         if (!report) return;
-        downloadText(`seo-report-${domainOf(report.url)}-${new Date().toISOString().slice(0, 10)}.md`, buildMarkdown(report, deep, advice.text, cruxOk));
+        downloadText(`seo-report-${domainOf(report.url)}-${new Date().toISOString().slice(0, 10)}.md`, buildMarkdown(report, deep, advice.text, cruxOk, searchOk));
       }
       function copyMd() {
         if (!report) return;
-        copyText(buildMarkdown(report, deep, advice.text, cruxOk));
+        copyText(buildMarkdown(report, deep, advice.text, cruxOk, searchOk));
         setCopied('md');
         setTimeout(() => setCopied(null), 1500);
       }
@@ -1423,6 +1469,7 @@ window.__ModuleLoader__.load({
       }
 
       const cruxOk = crux && crux.status === 'ok' && crux.data ? crux : null;
+      const searchOk = search && search.result && search.result.status === 'ok' ? { result: search.result } : null;
       const issueCount = report && report.issues ? report.issues.length : 0;
       const isSiteReport = report && report.mode === 'site';
       const tabLabel = (id) => (id === 'issues' ? `问题（${issueCount}）` : id === 'details' ? '检查明细' : id === 'overview' ? (isSiteReport ? '站点概览' : '页面概况') : 'AI 建议');
@@ -1660,6 +1707,12 @@ window.__ModuleLoader__.load({
                           entry.advice && entry.advice.text
                             ? h('span', { className: 'seo-wb-history-badge seo-wb-badge-advice', title: '已保存 AI 建议' }, 'AI')
                             : null,
+                          entry.crux && entry.crux.status === 'ok' && entry.crux.data && entry.crux.data.hasData
+                            ? h('span', { className: 'seo-wb-history-badge seo-wb-badge-crux', title: '已保存字段数据（CrUX）' }, '字段')
+                            : null,
+                          entry.search && entry.search.result
+                            ? h('span', { className: 'seo-wb-history-badge seo-wb-badge-search', title: '已保存搜索数据' }, '搜索')
+                            : null,
                         ),
                         entry.score !== undefined && entry.score !== null
                           ? h('span', { className: `seo-wb-score-chip seo-wb-score-chip-${scoreColor(entry.score)}` }, String(Math.round(entry.score)))
@@ -1871,6 +1924,8 @@ window.__ModuleLoader__.load({
 .seo-wb-page-bad { color: var(--dsw-alias-state-error-primary); font-weight: 600; }
 .seo-wb-page-flags { display: flex; flex-wrap: wrap; gap: 4px; }
 .seo-wb-badge-site { color: var(--dsw-alias-state-warn-primary); background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 12%, transparent); }
+.seo-wb-badge-crux { color: var(--dsw-alias-state-success-primary); background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 12%, transparent); }
+.seo-wb-badge-search { color: var(--dsw-alias-brand-primary); background: color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent); }
 .seo-wb-search-panel { margin-top: 24px; }
 .seo-wb-search-body { display: flex; flex-direction: column; gap: 10px; }
 .seo-wb-search-row { display: flex; gap: 8px; }
