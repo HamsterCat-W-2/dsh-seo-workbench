@@ -807,6 +807,9 @@ window.__ModuleLoader__.load({
       if (code === 'bad-key') return 'CrUX API Key 无效，请检查（⚙ 设置 → 深度检测 → CrUX API Key）。';
       if (code === 'quota') return 'CrUX 配额已用尽，换个项目或明天再试。';
       if (code === 'no-data') return '这个站点在 CrUX 数据库里没有足够样本（访问量太低不会出现），或该协议/域名不在统计中。';
+      if (code === 'forbidden') return 'CrUX 拒绝了请求（Permission denied on the service）：API Key 的应用限制挡住了，去 Google Cloud → 凭据 → 该 Key → 应用限制改成「无」（HTTP 引用网址/服务器 IP 限制对插件这种服务器端请求不适用），改完等 1–5 分钟再试。';
+      if (code === 'api-disabled') return '该项目还没启用 Chrome UX Report API，去 https://console.cloud.google.com/apis/library/chromeuxreport.googleapis.com 启用后 1–2 分钟再试。';
+      if (code === 'referer-restricted') return '这个 Key 限制了请求来源（HTTP 引用网址），插件从服务器端调用没有 referer，去凭据页把应用限制改成「无」。';
       if (code === 'timeout') return 'CrUX 请求超时，请重试。';
       return message || '获取字段数据失败';
     }
