@@ -691,15 +691,33 @@ window.__ModuleLoader__.load({
 
     // ------------------------------------------------------------- settings
 
-    const SETTINGS_FIELDS = [
-      ['defaultSite', '默认网址', 'text', '分析框自动预填的网址', 'https://example.com'],
-      ['psiKey', 'PageSpeed API Key', 'text', '可选；仅当本机没有 Chrome 时深度检测才回退到 PageSpeed', 'AIza…'],
-      ['timeoutMs', '抓取超时（毫秒）', 'text', '默认 15000', '15000'],
-      ['maxRedirects', '最大重定向数', 'text', '默认 5', '5'],
-      ['maxPages', '站点体检最大页数', 'text', '单次抓取上限，默认 30（2–200）', '30'],
-      ['includePattern', '只抓这些路径（正则，可空）', 'text', '作用于站内链接的「路径+查询串」；例 ^/blog/ 只抓博客区；留空 = 全部', '^/blog/'],
-      ['excludePattern', '排除这些路径（正则，可空）', 'text', '跳过匹配的站内链接；例 ^/detail/ 跳过详情页（几万页也不会占满上限）；留空 = 不排除', '^/detail/'],
-      ['pathQuotas', '路径配额（每行一条：正则=页数）', 'textarea', '例：^/detail/=10 — /detail/ 最多抓 10 页，其余跳过，不占其他页面的额度；留空 = 不限制', '^/detail/=10'],
+    const SETTINGS_SECTIONS = [
+      {
+        title: '通用',
+        hint: '两种模式都用到的设置',
+        fields: [
+          ['defaultSite', '默认网址', 'text', '输入框自动预填的网址（单页分析和站点体检共用）', 'https://example.com'],
+          ['timeoutMs', '抓取超时（毫秒）', 'text', '单页抓取和站点体检每个页面请求的超时，默认 15000', '15000'],
+          ['maxRedirects', '最大重定向数', 'text', '单个页面最多跟随的重定向次数，默认 5', '5'],
+        ],
+      },
+      {
+        title: '单页分析 / 深度检测',
+        hint: '只影响单页分析（含深度检测的 PageSpeed 回退）',
+        fields: [
+          ['psiKey', 'PageSpeed API Key', 'text', '可选；仅当本机没有 Chrome 时深度检测才回退到 PageSpeed', 'AIza…'],
+        ],
+      },
+      {
+        title: '站点体检',
+        hint: '只影响站点体检的爬虫行为',
+        fields: [
+          ['maxPages', '站点体检最大页数', 'text', '单次抓取上限，默认 30（2–200）', '30'],
+          ['includePattern', '只抓这些路径（正则，可空）', 'text', '作用于站内链接的「路径+查询串」；例 ^/blog/ 只抓博客区；留空 = 全部', '^/blog/'],
+          ['excludePattern', '排除这些路径（正则，可空）', 'text', '跳过匹配的站内链接；例 ^/detail/ 跳过详情页（几万页也不会占满上限）；留空 = 不排除', '^/detail/'],
+          ['pathQuotas', '路径配额（每行一条：正则=页数）', 'textarea', '例：^/detail/=10 — /detail/ 最多抓 10 页，其余跳过，不占其他页面的额度；留空 = 不限制', '^/detail/=10'],
+        ],
+      },
     ];
 
     function SettingsPanel({ open, saved, onClose, onSave }) {
@@ -722,27 +740,35 @@ window.__ModuleLoader__.load({
           'div',
           { className: 'seo-wb-settings', onClick: (e) => e.stopPropagation(), role: 'dialog', 'aria-label': '设置' },
           h('div', { className: 'seo-wb-settings-title' }, '设置'),
-          SETTINGS_FIELDS.map(([key, label, type, hint, ph]) =>
+          SETTINGS_SECTIONS.map((section) =>
             h(
-              'label',
-              { key, className: 'seo-wb-field' },
-              h('span', { className: 'seo-wb-field-label' }, label),
-              type === 'textarea'
-                ? h('textarea', {
-                    rows: 3,
-                    value: value[key] === undefined || value[key] === null ? '' : value[key],
-                    placeholder: ph,
-                    onChange: set(key),
-                    'aria-label': label,
-                  })
-                : h('input', {
-                    type,
-                    value: value[key] === undefined || value[key] === null ? '' : value[key],
-                    placeholder: ph,
-                    onChange: set(key),
-                    'aria-label': label,
-                  }),
-              h('span', { className: 'seo-wb-field-hint' }, hint),
+              'div',
+              { key: section.title, className: 'seo-wb-settings-section' },
+              h('div', { className: 'seo-wb-settings-section-title' }, section.title),
+              section.hint ? h('div', { className: 'seo-wb-settings-section-hint' }, section.hint) : null,
+              section.fields.map(([key, label, type, hint, ph]) =>
+                h(
+                  'label',
+                  { key, className: 'seo-wb-field' },
+                  h('span', { className: 'seo-wb-field-label' }, label),
+                  type === 'textarea'
+                    ? h('textarea', {
+                        rows: 3,
+                        value: value[key] === undefined || value[key] === null ? '' : value[key],
+                        placeholder: ph,
+                        onChange: set(key),
+                        'aria-label': label,
+                      })
+                    : h('input', {
+                        type,
+                        value: value[key] === undefined || value[key] === null ? '' : value[key],
+                        placeholder: ph,
+                        onChange: set(key),
+                        'aria-label': label,
+                      }),
+                  h('span', { className: 'seo-wb-field-hint' }, hint),
+                ),
+              ),
             ),
           ),
           h(
@@ -1403,7 +1429,7 @@ window.__ModuleLoader__.load({
 .seo-wb-history-del { border: 0; background: none; color: var(--dsw-alias-label-secondary); cursor: pointer; font-size: 12px; padding: 4px 6px; border-radius: 6px; flex-shrink: 0; }
 .seo-wb-history-del:hover { color: var(--dsw-alias-state-error-primary); background: var(--dsw-alias-bg-layer-2); }
 .seo-wb-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, .45); z-index: 999; display: flex; align-items: center; justify-content: center; }
-.seo-wb-settings { background: var(--dsw-alias-bg-base); border: 1px solid var(--dsw-alias-border-l1); border-radius: 14px; padding: 20px; width: 380px; max-width: 92vw; display: flex; flex-direction: column; gap: 12px; }
+.seo-wb-settings { background: var(--dsw-alias-bg-base); border: 1px solid var(--dsw-alias-border-l1); border-radius: 14px; padding: 20px; width: 380px; max-width: 92vw; display: flex; flex-direction: column; gap: 12px; max-height: 78vh; overflow-y: auto; }
 .seo-wb-settings-title { font-size: 16px; font-weight: 700; }
 .seo-wb-field { display: flex; flex-direction: column; gap: 4px; }
 .seo-wb-field-label { font-size: 13px; font-weight: 600; }
@@ -1411,6 +1437,9 @@ window.__ModuleLoader__.load({
 .seo-wb-field input:focus { border-color: var(--dsw-alias-brand-primary); outline: none; }
 .seo-wb-field textarea { background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; padding: 8px 10px; font-size: 13px; font-family: inherit; resize: vertical; min-height: 64px; }
 .seo-wb-field textarea:focus { border-color: var(--dsw-alias-brand-primary); outline: none; }
+.seo-wb-settings-section { margin-top: 6px; }
+.seo-wb-settings-section-title { font-size: 13px; font-weight: 600; color: var(--dsw-alias-brand-primary); border-bottom: 1px solid var(--dsw-alias-border-l1); padding-bottom: 4px; margin: 14px 0 6px; }
+.seo-wb-settings-section-hint { font-size: 11px; color: var(--dsw-alias-label-secondary); margin-bottom: 8px; }
 .seo-wb-field-hint { font-size: 11px; color: var(--dsw-alias-label-secondary); }
 .seo-wb-settings-actions { display: flex; gap: 8px; margin-top: 6px; }
 .seo-wb-settings-actions .seo-wb-btn-primary { margin-right: auto; }
