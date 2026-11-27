@@ -10,7 +10,7 @@ window.__ModuleLoader__.load({
   factory(require) {
     const React = require('react');
     const h = React.createElement;
-    const { useState, useEffect } = React;
+    const { useState, useEffect, useRef } = React;
 
     // ---------------------------------------------------------------- utils
 
@@ -22,7 +22,6 @@ window.__ModuleLoader__.load({
     const LS_HISTORY = 'seo-wb-history';
     const LS_MODEL = 'seo-wb-model';
     const LS_GSC = 'seo-wb-gsc';
-    const LS_CHAT = 'seo-wb-chat';
 
     const DEFAULT_SETTINGS = { defaultSite: '', psiKey: '', cruxKey: '', timeoutMs: 15000, maxRedirects: 5, maxPages: 100, includePattern: '', excludePattern: '', pathQuotas: '', gscClientId: '', gscClientSecret: '', bingApiKey: '' };
 
@@ -41,6 +40,183 @@ window.__ModuleLoader__.load({
       } catch {
         /* ignore */
       }
+    }
+
+    // ---- workbench state that must survive a panel switch -------------------
+    // The workbench lives in the `main` keyed slot: selecting a conversation
+    // unmounts this component, so every piece of React state would die with it
+    // (the open report, its extras, the URL, the active tab). The view is
+    // mirrored into localStorage on change and restored on the next mount.
+    const LS_VIEW = 'seo-wb-view';
+
+    function readView() {
+      const raw = lsGet(LS_VIEW, null);
+      return raw && typeof raw === 'object' ? raw : {};
+    }
+    function sanitizeView(next) {
+      // A snapshot may be taken mid-request; restoring "loading: true" would
+      // show a spinner nobody will ever clear.
+      if (next.advice) next.advice = { ...next.advice, loading: false };
+      if (next.schema) next.schema = { ...next.schema, loading: false };
+      if (next.fix) next.fix = { ...next.fix, loading: false };
+      if (next.keywords) next.keywords = { ...next.keywords, loading: false };
+      if (next.search) next.search = { ...next.search, loading: false };
+      if (next.indexStatus) next.indexStatus = { ...next.indexStatus, loading: false };
+      if (next.crux && next.crux.loading) next.crux = { ...next.crux, loading: false };
+      return next;
+    }
+    function writeView(patch) {
+      try {
+        let next = sanitizeView({ ...readView(), ...patch });
+        // localStorage is capped around 5 MB: keep the light state, drop the
+        // heavy payloads rather than failing the whole write.
+        let json = '';
+        try {
+          json = JSON.stringify(next);
+        } catch {
+          json = '';
+        }
+        if (!json || json.length > 4_000_000) {
+          next = { ...next, report: null, deep: null, keywords: null, search: null, indexStatus: null };
+        }
+        lsSet(LS_VIEW, next);
+      } catch {
+        /* persistence is best-effort */
+      }
+    }
+
+    // ---- history, written straight through to localStorage -----------------
+    // pushHistory used to live only in React state; when the panel unmounts
+    // mid-request the completion callback runs against the dead component and
+    // the entry is silently dropped. These helpers write localStorage first,
+    // so a result that lands after a panel switch still becomes a history entry.
+    function histAll() {
+      const raw = lsGet(LS_HISTORY, []);
+      return Array.isArray(raw) ? raw : [];
+    }
+    function histUpsert(entry) {
+      const next = [entry, ...histAll().filter((x) => x.id !== entry.id)];
+      // History is grouped as projects (one per site): newest 10 runs per site,
+      // 100 runs total as a safety cap.
+      const perSite = new Map();
+      const kept = [];
+      for (const item of next) {
+        const site = domainOf(item.url) || item.url;
+        const seen = perSite.get(site) || 0;
+        if (seen >= 10) continue;
+        perSite.set(site, seen + 1);
+        kept.push(item);
+      }
+      const capped = kept.slice(0, 100);
+      lsSet(LS_HISTORY, capped);
+      return capped;
+    }
+    function histPatch(id, patch) {
+      const next = histAll().map((entry) => (entry.id === id ? { ...entry, ...patch } : entry));
+      lsSet(LS_HISTORY, next);
+      return next;
+    }
+    function histEntry(reportValue) {
+      return {
+        id: `${reportValue.fetchedAt}-${reportValue.url}`,
+        url: reportValue.url,
+        finalUrl: reportValue.finalUrl,
+        fetchedAt: reportValue.fetchedAt,
+        score: reportValue.score && reportValue.score.total,
+        mode: reportValue.mode || 'page',
+        report: reportValue,
+        deep: null,
+        advice: null,
+        crux: null,
+        search: null,
+        keywords: null,
+        index: null,
+        schema: null,
+        fix: null,
+        chat: null,
+      };
+    }
+    function currentEntryId() {
+      const rep = readView().report;
+      return rep && rep.fetchedAt ? `${rep.fetchedAt}-${rep.url}` : null;
+    }
+
+    // ---- in-flight host work -----------------------------------------------
+    // Only one heavy request runs at a time (the panel shows a single progress
+    // row), so one slot suffices. The promise lives in module scope: when the
+    // panel unmounts mid-run the request keeps going, the settled result is
+    // written to localStorage by the persist callback, and a remounted panel
+    // picks the task up (running → busy + progress, settled → apply + finish).
+    const RUNNING = {
+      task: null,
+      listeners: new Set(),
+      subscribe(fn) {
+        this.listeners.add(fn);
+        return () => this.listeners.delete(fn);
+      },
+      emit() {
+        // Always hand out a fresh object: React bails out of identical state.
+        const snapshot = this.task ? { ...this.task } : null;
+        for (const fn of [...this.listeners]) fn(snapshot);
+      },
+      begin(kind, promise, persist) {
+        const task = { kind, startedAt: Date.now(), settled: false, result: null, error: null, applied: false };
+        this.task = task;
+        promise.then(
+          (result) => {
+            task.result = result;
+            task.settled = true;
+            if (persist) {
+              try {
+                persist(result);
+              } catch {
+                /* best-effort */
+              }
+            }
+            this.emit();
+          },
+          (error) => {
+            task.error = { message: (error && error.message) || String(error || '请求失败') };
+            task.settled = true;
+            this.emit();
+          },
+        );
+        this.emit();
+      },
+      finish(kind) {
+        if (this.task && this.task.kind === kind) {
+          this.task = null;
+          this.emit();
+        }
+      },
+    };
+
+    function persistReportResult(reportValue) {
+      writeView({ report: reportValue, mode: reportValue.mode || 'page', tab: 'issues' });
+      histUpsert(histEntry(reportValue));
+    }
+    function persistDeepResult(deepValue) {
+      writeView({ deep: deepValue });
+      const id = currentEntryId();
+      if (id) histPatch(id, { deep: deepValue });
+    }
+    function persistAdviceResult(data, modelSelValue) {
+      const text = (data && data.text) || '';
+      writeView({ advice: { loading: false, text, error: null } });
+      const id = currentEntryId();
+      if (id) histPatch(id, { advice: { text, model: modelSelValue } });
+    }
+    function persistSchemaResult(data) {
+      writeView({ schema: { loading: false, error: null, data } });
+      const id = currentEntryId();
+      if (id) histPatch(id, { schema: data });
+    }
+    function persistFixResult(data) {
+      const pages = (data && data.pages) || [];
+      const text = (data && data.text) || '';
+      writeView({ fix: { loading: false, error: null, pages, text } });
+      const id = currentEntryId();
+      if (id) histPatch(id, { fix: { pages, text } });
     }
 
     function normalizeUrl(raw) {
@@ -184,7 +360,7 @@ window.__ModuleLoader__.load({
       textarea.remove();
     }
 
-    function buildMarkdown(report, deep, adviceText, cruxOk, searchOk, keywordsOk, indexOk) {
+    function buildMarkdown(report, deep, adviceText, cruxOk, searchOk, keywordsOk, indexOk, extra) {
       const L = [];
       L.push(report.mode === 'site' ? `# SEO 站点体检报告 — ${domainOf(report.url)}` : `# SEO 分析报告 — ${report.url}`);
       L.push('');
@@ -383,6 +559,36 @@ window.__ModuleLoader__.load({
         L.push('## AI 建议');
         L.push('');
         L.push(adviceText.trim());
+        L.push('');
+      }
+      if (extra && extra.schema && extra.schema.data) {
+        const sch = extra.schema.data;
+        const blocks = sch.blocks || [];
+        if (blocks.length) {
+          L.push('## 结构化数据（JSON-LD）');
+          L.push('');
+          for (const blk of blocks) {
+            L.push(`### 块（${(blk.types || []).join('、') || '未知类型'}）— ${blk.ok ? '语法正常' : '语法错误'}`);
+            if (!blk.ok) {
+              L.push(`- 语法错误：${blk.error || ''}`);
+              continue;
+            }
+            for (const nd of blk.nodes || []) {
+              const miss = (nd.missing || []).length ? `缺必需属性：${nd.missing.join('、')}` : '必需属性齐全';
+              L.push(`- ${nd.type}：${miss}${(nd.warnings || []).length ? `；建议补充：${nd.warnings.join('、')}` : ''}`);
+            }
+          }
+          L.push('');
+        }
+      }
+      if (extra && extra.fix && (extra.fix.pages || []).length) {
+        L.push('## AI 修复清单（建议标题 / 描述）');
+        L.push('');
+        L.push('| 页面 | 建议标题 | 建议描述 | 涉及问题 |');
+        L.push('| --- | --- | --- | --- |');
+        for (const p of extra.fix.pages) {
+          L.push(`| ${p.url || ''} | ${p.title || ''} | ${p.description || ''} | ${(p.issues || []).join('；')} |`);
+        }
         L.push('');
       }
       if ((report.notes || []).length) {
@@ -689,7 +895,967 @@ window.__ModuleLoader__.load({
       );
     }
 
-    function KeywordsSection({ keywords, onRun, report }) {
+    function CompareSection({ report, deep, history }) {
+      const [baseId, setBaseId] = useState(null);
+      if (!report) return null;
+      const mode = report.mode || 'page';
+      const currentId = `${report.fetchedAt}-${report.url}`;
+      const domain = domainOf(report.url);
+      const currentTarget = String(report.finalUrl || report.url || '').replace(/\/$/, '');
+      const candidates = (history || [])
+        .filter((e) => e.report && (e.mode || 'page') === mode && domainOf(e.url) === domain && e.id !== currentId)
+        .filter((e) => mode !== 'page' || String(e.report.finalUrl || e.report.url || '').replace(/\/$/, '') === currentTarget)
+        .sort((a, b) => String(b.fetchedAt || '').localeCompare(String(a.fetchedAt || '')));
+      const base = candidates.find((e) => e.id === baseId) || (candidates.length ? candidates[0] : null);
+      if (!base || !base.report) {
+        return h('div', { className: 'seo-wb-empty' }, mode === 'page' ? '还没有这个页面的历史记录。再分析一次同一页面后，这里会显示两次结果的变化。' : '还没有这个站点的历史记录。再体检一次同一站点后，这里会显示两次结果的变化。');
+      }
+      const curScore = (report.score && typeof report.score.total === 'number' ? report.score : { total: null, groups: {} });
+      const oldScore = base.report.score && typeof base.report.score.total === 'number' ? base.report.score : { total: null, groups: {} };
+      const curGroups = curScore.groups || {};
+      const oldGroups = oldScore.groups || {};
+      const groupIds = [...new Set([...Object.keys(oldGroups), ...Object.keys(curGroups)])];
+      const labelOf = {};
+      for (const g of report.groups || []) labelOf[g.id] = g.label;
+      for (const g of base.report.groups || []) if (!labelOf[g.id]) labelOf[g.id] = g.label;
+      const scoreText = (v) => (typeof v === 'number' ? `${v}` : '—');
+      const deltaChip = (before, after) => {
+        if (typeof before !== 'number' || typeof after !== 'number') return null;
+        const d = after - before;
+        return h('span', { className: d > 0 ? 'seo-wb-delta seo-wb-delta-good' : d < 0 ? 'seo-wb-delta seo-wb-delta-bad' : 'seo-wb-delta seo-wb-delta-flat' }, d > 0 ? `+${d} ↑` : d < 0 ? `${d} ↓` : '持平');
+      };
+      const issueKey = (i) => String((i && i.id) || (i && i.title) || '');
+      const oldList = base.report.issues || [];
+      const curList = report.issues || [];
+      const oldKeys = new Set(oldList.map(issueKey));
+      const curKeys = new Set(curList.map(issueKey));
+      const newIssues = curList.filter((i) => !oldKeys.has(issueKey(i)));
+      const fixedIssues = oldList.filter((i) => !curKeys.has(issueKey(i)));
+      const CWVM = [
+        ['LCP', 'lcpMs', 'ms', (v) => v <= 2500],
+        ['FCP', 'fcpMs', 'ms', (v) => v <= 1800],
+        ['TTFB', 'ttfbMs', 'ms', (v) => v <= 800],
+        ['CLS', 'cls', '', (v) => v <= 0.1],
+        ['TBT', 'tbtMs', 'ms', (v) => v <= 200],
+        ['INP', 'inpMs', 'ms', (v) => v <= 200],
+      ];
+      const curM = (deep && deep.metrics) || {};
+      const oldM = (base.deep && base.deep.metrics) || {};
+      const cwvRows = CWVM.filter(([, k]) => typeof curM[k] === 'number' && typeof oldM[k] === 'number');
+      const fmtV = (v, unit) => (unit === 'ms' ? `${Math.round(v)}ms` : String(v));
+      const fmtDelta = (d, unit) => (unit === 'ms' ? `${d > 0 ? '+' : ''}${Math.round(d)}ms` : `${d > 0 ? '+' : ''}${d}`);
+      const stOld = base.report.stats || {};
+      const stCur = report.stats || {};
+      const siteRows = mode === 'site' && (stOld.pages != null || stCur.pages != null)
+        ? [
+            ['页面数', stOld.pages, stCur.pages],
+            ['成功', stOld.ok, stCur.ok],
+            ['失败', stOld.failed, stCur.failed],
+            ['死链', stOld.deadLinksFound, stCur.deadLinksFound],
+            ['被 robots 跳过', stOld.skippedDisallowed, stCur.skippedDisallowed],
+          ].filter(([, b, a]) => b != null || a != null)
+        : [];
+      return h(
+        'div',
+        { className: 'seo-wb-diff' },
+        h(
+          'div',
+          { className: 'seo-wb-diff-head' },
+          h('span', { className: 'seo-wb-diff-title' }, '与历史记录对比'),
+          candidates.length
+            ? h(
+                'label',
+                { className: 'seo-wb-diff-pick' },
+                '基准：',
+                h(
+                  'select',
+                  { value: base.id, onChange: (e) => setBaseId(e.target.value) },
+                  candidates.map((e) => h('option', { key: e.id, value: e.id }, `${fmtTime(e.fetchedAt)}（${(e.report.score && e.report.score.total) || '—'} 分）`)),
+                ),
+              )
+            : null,
+        ),
+        h(
+          'div',
+          { className: 'seo-wb-diff-score' },
+          h(
+            'div',
+            { className: 'seo-wb-diff-score-row seo-wb-diff-score-total' },
+            h('span', { className: 'seo-wb-diff-label' }, '总分'),
+            h('span', { className: 'seo-wb-diff-before' }, scoreText(oldScore.total)),
+            h('span', { className: 'seo-wb-diff-arrow' }, '→'),
+            h('span', { className: 'seo-wb-diff-after' }, scoreText(curScore.total)),
+            deltaChip(oldScore.total, curScore.total),
+          ),
+          groupIds.map((gid) =>
+            h(
+              'div',
+              { key: gid, className: 'seo-wb-diff-score-row' },
+              h('span', { className: 'seo-wb-diff-label' }, labelOf[gid] || gid),
+              h('span', { className: 'seo-wb-diff-before' }, scoreText(oldGroups[gid])),
+              h('span', { className: 'seo-wb-diff-arrow' }, '→'),
+              h('span', { className: 'seo-wb-diff-after' }, scoreText(curGroups[gid])),
+              deltaChip(oldGroups[gid], curGroups[gid]),
+            ),
+          ),
+        ),
+        h(
+          'div',
+          { className: 'seo-wb-diff-issues' },
+          h(
+            'div',
+            { className: 'seo-wb-diff-col' },
+            h('h4', null, `新增问题（${newIssues.length}）`),
+            newIssues.length
+              ? h('ul', { className: 'seo-wb-diff-list' }, newIssues.map((i) => h('li', { key: issueKey(i) }, h(SeverityChip, { severity: i.severity }), h('span', { className: 'seo-wb-diff-issue-title' }, i.title))))
+              : h('div', { className: 'seo-wb-diff-empty' }, '没有新增问题'),
+          ),
+          h(
+            'div',
+            { className: 'seo-wb-diff-col' },
+            h('h4', null, `已修复（${fixedIssues.length}）`),
+            fixedIssues.length
+              ? h('ul', { className: 'seo-wb-diff-list' }, fixedIssues.map((i) => h('li', { key: issueKey(i) }, h(SeverityChip, { severity: i.severity }), h('span', { className: 'seo-wb-diff-issue-title' }, i.title))))
+              : h('div', { className: 'seo-wb-diff-empty' }, '没有已修复的问题'),
+          ),
+        ),
+        cwvRows.length
+          ? h(
+              'div',
+              { className: 'seo-wb-diff-cwv' },
+              h('h4', null, `核心网页指标变化（${fmtTime(base.fetchedAt)} → ${fmtTime(report.fetchedAt)}）`),
+              h(
+                'table',
+                { className: 'seo-wb-table' },
+                h('thead', null, h('tr', null, h('th', null, '指标'), h('th', null, '之前'), h('th', null, '现在'), h('th', null, '变化'))),
+                h(
+                  'tbody',
+                  null,
+                  cwvRows.map(([label, k, unit, ok]) => {
+                    const before = oldM[k];
+                    const after = curM[k];
+                    const d = after - before;
+                    return h(
+                      'tr',
+                      { key: k },
+                      h('td', null, label, h('span', { className: ok(after) ? 'seo-wb-badge seo-wb-badge-ok' : 'seo-wb-badge seo-wb-badge-warn' }, ok(after) ? '达标' : '未达标')),
+                      h('td', null, fmtV(before, unit)),
+                      h('td', null, fmtV(after, unit)),
+                      h('td', { className: d > 0 ? 'seo-wb-delta-bad' : d < 0 ? 'seo-wb-delta-good' : 'seo-wb-delta-flat' }, fmtDelta(d, unit)),
+                    );
+                  }),
+                ),
+              ),
+            )
+          : null,
+        siteRows.length
+          ? h(
+              'div',
+              { className: 'seo-wb-diff-site' },
+              h('h4', null, '站点规模变化'),
+              h(
+                'table',
+                { className: 'seo-wb-table' },
+                h('thead', null, h('tr', null, h('th', null, '指标'), h('th', null, '之前'), h('th', null, '现在'))),
+                h(
+                  'tbody',
+                  null,
+                  siteRows.map(([label, b, a]) =>
+                    h('tr', { key: label }, h('td', null, label), h('td', null, b == null ? '—' : b), h('td', null, a == null ? '—' : a)),
+                  ),
+                ),
+              ),
+            )
+          : null,
+      );
+    }
+
+    function SchemaPanel({ schema, onRun, modelReady, modelSel }) {
+      const data = schema && schema.data;
+      const loading = schema && schema.loading;
+      const error = schema && schema.error;
+      const [fixState, setFixState] = useState({});
+      const [copiedKey, setCopiedKey] = useState(null);
+      function flashFix(key) {
+        setCopiedKey(key);
+        window.setTimeout(() => setCopiedKey(null), 1500);
+      }
+      function runBlockFix(i, blk) {
+        const [provider, model] = String(modelSel || '').split('|');
+        if (!provider || !model) {
+          setFixState((s2) => ({ ...s2, [i]: { loading: false, code: '', error: '请先在顶部选择模型' } }));
+          return;
+        }
+        const missing = (blk.nodes || []).reduce((acc, n) => acc.concat((n.missing || []).map((m) => `${n.type}.${m}`)), []);
+        setFixState((s2) => ({ ...s2, [i]: { loading: true, code: '', error: null } }));
+        postJson('/seo-workbench/api/schema-fix', {
+          url: (data && (data.finalUrl || data.url)) || '',
+          raw: blk.raw || '',
+          types: blk.types || [],
+          missing,
+          model: { provider, model },
+        })
+          .then((res) => {
+            if (res.status !== 'ok') throw new Error((res.error && res.error.message) || 'AI 补全失败');
+            setFixState((s2) => ({ ...s2, [i]: { loading: false, code: res.code || '', error: res.parseFailed ? '模型输出无法解析成 JSON，已保留原文' : null } }));
+          })
+          .catch((err) => {
+            setFixState((s2) => ({ ...s2, [i]: { loading: false, code: '', error: err.message || String(err) } }));
+          });
+      }
+      useEffect(() => {
+        if (!loading && !error && !data && typeof onRun === 'function') onRun();
+      }, [loading, error, data]);
+      if (loading) {
+        return h('div', { className: 'seo-wb-schema' }, h(Spinner, { label: '检测结构化数据…' }));
+      }
+      if (error) {
+        return h('div', { className: 'seo-wb-schema' }, h('div', { className: 'seo-wb-error', role: 'alert' }, h('span', { className: 'seo-wb-error-mark' }, '!'), h('span', null, error)));
+      }
+      if (!data) {
+        return h('div', { className: 'seo-wb-schema' }, h('div', { className: 'seo-wb-empty' }, '未检测。'));
+      }
+      const blocks = data.blocks || [];
+      const types = data.types || [];
+      return h(
+        'div',
+        { className: 'seo-wb-schema' },
+        h(
+          'div',
+          { className: 'seo-wb-schema-head' },
+          h(
+            'div',
+            { className: 'seo-wb-schema-summary' },
+            h('strong', null, `JSON-LD 块：${blocks.length}`),
+            types.length ? h('span', { className: 'seo-wb-schema-types' }, types.map((t) => h('span', { key: t, className: 'seo-wb-chip seo-wb-chip-schema' }, t))) : null,
+          ),
+          h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-ghost', onClick: onRun, disabled: loading }, '重新检测'),
+        ),
+        !data.hasJsonLd
+          ? h('div', { className: 'seo-wb-empty' }, '页面没有 JSON-LD 结构化数据。如果是前端 JS 注入的，用「深度检测」查看渲染后的 DOM 再判断。')
+          : blocks.map((blk, i) =>
+              h(
+                'div',
+                { key: i, className: 'seo-wb-schema-block' },
+                h(
+                  'div',
+                  { className: 'seo-wb-schema-block-head' },
+                  h('span', { className: 'seo-wb-schema-block-title' }, `块 #${i + 1}`),
+                  blk.ok ? h('span', { className: 'seo-wb-badge seo-wb-badge-ok' }, '语法正常') : h('span', { className: 'seo-wb-badge seo-wb-badge-bad' }, '语法错误'),
+                  (blk.types || []).map((t) => h('span', { key: t, className: 'seo-wb-chip seo-wb-chip-schema' }, t)),
+                ),
+                !blk.ok
+                  ? h('div', { className: 'seo-wb-schema-syntax' }, blk.error || 'JSON 解析失败')
+                  : (blk.nodes || []).map((nd, j) =>
+                      h(
+                        'div',
+                        { key: j, className: 'seo-wb-schema-node' },
+                        h(
+                          'div',
+                          { className: 'seo-wb-schema-node-head' },
+                          h('strong', null, nd.type),
+                          nd.missing && nd.missing.length
+                            ? h('span', { className: 'seo-wb-badge seo-wb-badge-bad' }, `缺必需属性 ${nd.missing.length}`)
+                            : h('span', { className: 'seo-wb-badge seo-wb-badge-ok' }, '必需属性齐全'),
+                          nd.warnings && nd.warnings.length ? h('span', { className: 'seo-wb-badge seo-wb-badge-warn' }, `建议 ${nd.warnings.length}`) : null,
+                        ),
+                        nd.present && nd.present.length ? h('div', { className: 'seo-wb-schema-props' }, nd.present.join('、')) : null,
+                        nd.missing && nd.missing.length ? h('div', { className: 'seo-wb-schema-miss' }, nd.missing.map((m) => h('span', { key: m, className: 'seo-wb-badge seo-wb-badge-bad' }, m))) : null,
+                      ),
+                    ),
+                blk.rich && blk.rich.eligible ? h('div', { className: 'seo-wb-schema-rich' }, 'Rich Results 提示：', blk.rich.hints.join('；')) : null,
+                blk.warnings && blk.warnings.length ? h('div', { className: 'seo-wb-schema-warn' }, blk.warnings.join('；')) : null,
+                h(
+                  'div',
+                  { className: 'seo-wb-schema-fix' },
+                  h(
+                    'div',
+                    { className: 'seo-wb-schema-fix-head' },
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'seo-wb-btn seo-wb-btn-mini',
+                        onClick: () => runBlockFix(i, blk),
+                        disabled: !modelReady || !!(fixState[i] && fixState[i].loading),
+                      },
+                      fixState[i] && fixState[i].loading ? 'AI 补全中…' : 'AI 补全结构化数据',
+                    ),
+                    !modelReady ? h('span', { className: 'seo-wb-schema-fix-hint' }, '先在顶部选择模型') : null,
+                  ),
+                  fixState[i] && fixState[i].loading ? h(Spinner, { label: '模型补全 JSON-LD 中…' }) : null,
+                  fixState[i] && fixState[i].error ? h('div', { className: 'seo-wb-error', role: 'alert' }, fixState[i].error) : null,
+                  fixState[i] && fixState[i].code
+                    ? h(
+                        'div',
+                        { className: 'seo-wb-schema-fix-out' },
+                        h(
+                          'div',
+                          { className: 'seo-wb-schema-fix-out-head' },
+                          h('span', null, '补全后的 JSON-LD'),
+                          h(
+                            'button',
+                            {
+                              type: 'button',
+                              className: 'seo-wb-btn seo-wb-btn-ghost seo-wb-fix-copy',
+                              onClick: () => {
+                                copyText(fixState[i].code);
+                                flashFix('c' + i);
+                              },
+                            },
+                            copiedKey === 'c' + i ? '已复制 ✓' : '复制',
+                          ),
+                        ),
+                        h('pre', { className: 'seo-wb-md-pre' }, fixState[i].code),
+                      )
+                    : null,
+                ),
+              ),
+            ),
+        (data.notes || []).length ? h('div', { className: 'seo-wb-notes' }, data.notes.map((n, k) => h('div', { key: k }, '· ' + n))) : null,
+      );
+    }
+
+    function FixPlanPanel({ fix, onRun, modelReady, report }) {
+      const [copiedKey, setCopiedKey] = useState(null);
+      const pages = (fix && fix.pages) || [];
+      const text = (fix && fix.text) || '';
+      const loading = fix && fix.loading;
+      const error = fix && fix.error;
+      function flash(key) {
+        setCopiedKey(key);
+        window.setTimeout(() => setCopiedKey(null), 1500);
+      }
+      function copyValue(key, value) {
+        copyText(value);
+        flash(key);
+      }
+      function exportCsv() {
+        const esc = (v) => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+        const head = ['页面', '建议标题', '建议描述', '涉及问题', '备注'];
+        const rows = pages.map((p) => [p.url || '', p.title || '', p.description || '', (p.issues || []).join('；'), p.note || '']);
+        const csv = '\ufeff' + [head, ...rows].map((r) => r.map(esc).join(',')).join('\r\n');
+        const date = String((report && report.fetchedAt) || '').slice(0, 10) || 'today';
+        downloadText(`seo-fixplan-${domainOf((report && report.url) || '') || 'site'}-${date}.csv`, csv);
+      }
+      function copyTable() {
+        const head = ['页面', '建议标题', '建议描述', '涉及问题'];
+        const rows = pages.map((p) => [p.url || '', p.title || '', p.description || '', (p.issues || []).join('；')]);
+        const body = rows.map((r) => '| ' + r.map((c) => String(c).replace(/\|/g, '\\|')).join(' | ') + ' |').join('\n');
+        const md = '| ' + head.map((c) => String(c)).join(' | ') + ' |\n| ' + head.map(() => '---').join(' | ') + ' |\n' + body;
+        copyText(md).then(() => flash('md'));
+      }
+      if (loading) {
+        return h('div', { className: 'seo-wb-fix' }, h(Spinner, { label: '模型生成修复清单中…' }));
+      }
+      if (error) {
+        return h('div', { className: 'seo-wb-fix' }, h('div', { className: 'seo-wb-error', role: 'alert' }, h('span', { className: 'seo-wb-error-mark' }, '!'), h('span', null, error)));
+      }
+      if (!pages.length && !text) {
+        return h(
+          'div',
+          { className: 'seo-wb-fix' },
+          h(
+            'div',
+            { className: 'seo-wb-fix-actions' },
+            h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-primary', onClick: onRun, disabled: !modelReady }, '生成修复清单'),
+            h('span', { className: 'seo-wb-fix-hint' }, modelReady ? '为存在标题/描述问题的页面批量生成新 title 与 meta description，可导出 CSV 或复制 Markdown 表格。' : '先在顶部选择模型。'),
+          ),
+        );
+      }
+      const lenBadge = (v, max) => {
+        const n = String(v || '').length;
+        return h('span', { className: `seo-wb-len${n > max ? ' seo-wb-len-over' : n ? ' seo-wb-len-ok' : ''}`, title: `${n} 字符，上限 ${max}` }, `${n}/${max}`);
+      };
+      return h(
+        'div',
+        { className: 'seo-wb-fix' },
+        h(
+          'div',
+          { className: 'seo-wb-fix-actions' },
+          h('button', { type: 'button', className: 'seo-wb-btn', onClick: onRun, disabled: !modelReady }, '重新生成'),
+          h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-ghost', onClick: exportCsv }, '导出 CSV'),
+          h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-ghost', onClick: copyTable }, copiedKey === 'md' ? '已复制 ✓' : '复制 Markdown'),
+        ),
+        text && !pages.length
+          ? h(
+              'div',
+              { className: 'seo-wb-fix-raw' },
+              h('div', { className: 'seo-wb-fix-raw-note' }, '模型输出无法解析成表格，以下是原始文本：'),
+              h('pre', { className: 'seo-wb-advice-pre' }, text),
+            )
+          : null,
+        pages.length
+          ? h(
+              'table',
+              { className: 'seo-wb-table seo-wb-fix-table' },
+              h(
+                'thead',
+                null,
+                h(
+                  'tr',
+                  null,
+                  h('th', null, '页面'),
+                  h('th', null, '建议标题'),
+                  h('th', null, '建议描述'),
+                  h('th', null, '涉及问题'),
+                  h('th', null, '备注'),
+                ),
+              ),
+              h(
+                'tbody',
+                null,
+                pages.map((p, i) =>
+                  h(
+                    'tr',
+                    { key: (p.url || '') + i },
+                    h('td', { className: 'seo-wb-fix-url', title: p.url }, p.url || '—'),
+                    h(
+                      'td',
+                      { className: 'seo-wb-fix-cell' },
+                      h('div', { className: 'seo-wb-fix-val' }, p.title || '—'),
+                      h('div', { className: 'seo-wb-fix-meta' }, lenBadge(p.title, 60), h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-ghost seo-wb-fix-copy', onClick: () => copyValue('t' + i, p.title || '') }, copiedKey === 't' + i ? '已复制 ✓' : '复制')),
+                    ),
+                    h(
+                      'td',
+                      { className: 'seo-wb-fix-cell' },
+                      h('div', { className: 'seo-wb-fix-val' }, p.description || '—'),
+                      h('div', { className: 'seo-wb-fix-meta' }, lenBadge(p.description, 150), h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-ghost seo-wb-fix-copy', onClick: () => copyValue('d' + i, p.description || '') }, copiedKey === 'd' + i ? '已复制 ✓' : '复制')),
+                    ),
+                    h('td', { className: 'seo-wb-fix-issues' }, (p.issues || []).map((x) => h('span', { key: x, className: 'seo-wb-chip' }, x))),
+                    h('td', { className: 'seo-wb-fix-note' }, p.note || ''),
+                  ),
+                ),
+              ),
+            )
+          : null,
+      );
+    }
+
+    function LinkFixPanel({ report }) {
+      const [copiedKey, setCopiedKey] = useState(null);
+      const isSite = report && report.mode === 'site';
+      const issues = (report && report.issues) || [];
+      const pages = (report && report.pages) || [];
+      const findIssue = (id) => issues.find((it) => it.id === id);
+      const deadRows = ((findIssue('dead-links') || {}).pages || []);
+      const redirectRows = ((findIssue('redirect-chains') || {}).pages || []);
+      const orphanRows = ((findIssue('orphan-pages') || {}).pages || []);
+      const liveUrls = pages.filter((p) => p.httpStatus === 200 && !p.failed).map((p) => p.url);
+      function flash(key) {
+        setCopiedKey(key);
+        window.setTimeout(() => setCopiedKey(null), 1500);
+      }
+      function copyValue(key, value) {
+        copyText(value);
+        flash(key);
+      }
+      /** Heuristic 301 target: closest live page by longest shared path prefix, fallback origin. */
+      function suggestTarget(url) {
+        try {
+          const origin = new URL(url).origin;
+          const segs = new URL(url).pathname.split('/').filter(Boolean);
+          let best = null;
+          let bestScore = -1;
+          for (const live of liveUrls) {
+            try {
+              const lsegs = new URL(live).pathname.split('/').filter(Boolean);
+              let score = 0;
+              const max = Math.min(segs.length, lsegs.length);
+              for (let k = 0; k < max; k += 1) {
+                if (segs[k] === lsegs[k]) score += 1;
+                else break;
+              }
+              // Prefix match bonus: /pricing is a fine target for /pricing-v1.
+              if (lsegs.length > 0 && segs.slice(0, lsegs.length).join('/') === lsegs.join('/')) score += 1;
+              else if (segs.length > 0 && lsegs.slice(0, segs.length).join('/') === segs.join('/')) score += 1;
+              // String-prefix bonus: /pricing is a sensible target for /pricing-v1.
+              try {
+                const dp = new URL(url).pathname.replace(/\/$/, '');
+                const lp = new URL(live).pathname.replace(/\/$/, '');
+                if (lp && dp !== lp && (dp.startsWith(lp) || lp.startsWith(dp))) score += 1;
+              } catch {
+                // ignore malformed live url
+              }
+              if (score > bestScore) {
+                bestScore = score;
+                best = live;
+              }
+            } catch {
+              // ignore malformed live url
+            }
+          }
+          if (best && bestScore > 0) return best;
+          return `${origin}/`;
+        } catch {
+          return '/';
+        }
+      }
+      function splitDeadDetail(detail) {
+        const m = /^(.*?)\s*←\s*(.*)$/.exec(detail || '');
+        return m ? { status: m[1].trim(), foundOn: m[2].trim() } : { status: '', foundOn: detail || '' };
+      }
+      const rows = [
+        ...deadRows.map((r) => ({ kind: '死链', url: r.url, detail: r.detail || '', target: suggestTarget(r.url) })),
+        ...redirectRows.map((r) => ({ kind: '重定向', url: r.url, detail: r.detail || '', target: '' })),
+        ...orphanRows.map((r) => ({ kind: '孤儿页', url: r.url, detail: r.detail || '', target: '' })),
+      ];
+      function exportCsv() {
+        const esc = (v) => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+        const head = ['类型', 'URL', '详情', '建议处理'];
+        const data = {
+          死链: '301 重定向到建议目标',
+          重定向: '更新站内链接指向最终地址',
+          孤儿页: '补充至少 1 条来自已收录页面的站内入链',
+        };
+        const body = rows.map((r) => [r.kind, r.url, r.detail, r.target ? `301 → ${r.target}` : data[r.kind] || '']);
+        const csv = '\ufeff' + [head, ...body].map((r) => r.map(esc).join(',')).join('\r\n');
+        const date = String((report && report.fetchedAt) || '').slice(0, 10) || 'today';
+        downloadText(`seo-links-${domainOf((report && report.url) || '') || 'site'}-${date}.csv`, csv);
+      }
+      function copyTable() {
+        const head = ['类型', 'URL', '详情', '建议处理'];
+        const body = rows.map((r) => [r.kind, r.url, r.detail, r.target ? `301 → ${r.target}` : '']);
+        const md =
+          '| ' + head.join(' | ') + ' |\n| ' + head.map(() => '---').join(' | ') + ' |\n' +
+          body.map((r) => '| ' + r.map((c) => String(c).replace(/\|/g, '\\|')).join(' | ') + ' |').join('\n');
+        copyText(md);
+        flash('md');
+      }
+      const pageChain = !isSite && report && report.page && Array.isArray(report.page.redirectChain) ? report.page.redirectChain : [];
+      const table = (kind, list, opts) =>
+        h(
+          'div',
+          { className: 'seo-wb-links-block' },
+          h('div', { className: 'seo-wb-links-block-title' }, `${kind}（${list.length}）`),
+          h(
+            'div',
+            { className: 'seo-wb-se-table seo-wb-links-table' },
+            h('div', { className: 'seo-wb-se-row seo-wb-se-head' }, h('span', null, 'URL'), h('span', null, '详情'), h('span', null, '建议')),
+            list.map((r, i) =>
+              h(
+                'div',
+                { key: i, className: 'seo-wb-se-row' },
+                h('span', { className: 'seo-wb-se-page', title: r.url }, r.url || '—'),
+                h('span', { className: 'seo-wb-links-detail' }, r.detail || '—'),
+                h(
+                  'span',
+                  { className: 'seo-wb-links-suggest' },
+                  opts && opts.suggest ? opts.suggest(r) : (r.target ? h('span', { className: 'seo-wb-links-target' }, `301 → ${r.target}`) : '—'),
+                ),
+              ),
+            ),
+          ),
+        );
+      const hint = isSite
+        ? '死链给 301 目标建议、重定向链与孤儿页清单，可直接导出 CSV 交给开发批量处理。'
+        : '单页分析只包含当前页的重定向链；全站死链 / 孤儿页清单请先做「站点体检」。';
+      if (!rows.length && !pageChain.length) {
+        return h('div', { className: 'seo-wb-links' }, h('div', { className: 'seo-wb-empty' }, `没有发现死链、重定向或孤儿页。${hint}`));
+      }
+      return h(
+        'div',
+        { className: 'seo-wb-links' },
+        h(
+          'div',
+          { className: 'seo-wb-links-head' },
+          h('div', { className: 'seo-wb-links-summary' }, `${rows.length ? `共 ${rows.length} 条链接问题 · ` : ''}死链 ${deadRows.length} · 重定向 ${redirectRows.length} · 孤儿页 ${orphanRows.length}`),
+          h(
+            'div',
+            { className: 'seo-wb-links-actions' },
+            h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-ghost', onClick: exportCsv }, '导出 CSV'),
+            h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-ghost', onClick: copyTable }, copiedKey === 'md' ? '已复制 ✓' : '复制 Markdown'),
+          ),
+        ),
+        pageChain.length
+          ? h(
+              'div',
+              { className: 'seo-wb-links-block' },
+              h('div', { className: 'seo-wb-links-block-title' }, `页面重定向链（${pageChain.length} 跳）`),
+              h(
+                'div',
+                { className: 'seo-wb-se-table seo-wb-links-table' },
+                h('div', { className: 'seo-wb-se-row seo-wb-se-head' }, h('span', null, '从'), h('span', null, '到'), h('span', null, '状态码')),
+                pageChain.map((hop, i) =>
+                  h(
+                    'div',
+                    { key: i, className: 'seo-wb-se-row' },
+                    h('span', { className: 'seo-wb-se-page', title: hop.from }, hop.from || '—'),
+                    h('span', { className: 'seo-wb-se-page', title: hop.to }, hop.to || '—'),
+                    h('span', null, hop.status != null ? String(hop.status) : '—'),
+                  ),
+                ),
+              ),
+              h('div', { className: 'seo-wb-links-note' }, '每多一跳都会损失抓取预算与权重，建议把站内链接直接指向最终地址。'),
+            )
+          : null,
+        deadRows.length
+          ? h(
+              'div',
+              { className: 'seo-wb-links-block' },
+              h('div', { className: 'seo-wb-links-block-title' }, `死链（${deadRows.length}）`),
+              h(
+                'div',
+                { className: 'seo-wb-se-table seo-wb-links-table' },
+                h('div', { className: 'seo-wb-se-row seo-wb-se-head' }, h('span', null, '死链 URL'), h('span', null, '状态 / 来源页'), h('span', null, '301 建议')),
+                deadRows.map((r, i) => {
+                  const d = splitDeadDetail(r.detail);
+                  return h(
+                    'div',
+                    { key: i, className: 'seo-wb-se-row' },
+                    h('span', { className: 'seo-wb-se-page', title: r.url }, r.url || '—'),
+                    h('span', { className: 'seo-wb-links-detail' }, d.status ? `${d.status} ← ${d.foundOn}` : d.foundOn || '—'),
+                    h('span', { className: 'seo-wb-links-suggest' }, h('span', { className: 'seo-wb-links-target', title: suggestTarget(r.url) }, `301 → ${suggestTarget(r.url)}`), h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-ghost seo-wb-links-copy', onClick: () => copyValue('t' + i, `301 到 ${suggestTarget(r.url)}`) }, copiedKey === 't' + i ? '已复制 ✓' : '复制')),
+                  );
+                }),
+              ),
+            )
+          : null,
+        redirectRows.length ? table('重定向到最终地址', redirectRows, { suggest: (r) => h('span', { className: 'seo-wb-links-note-inline' }, r.detail || '更新站内链接') }) : null,
+        orphanRows.length ? table('孤儿页（无站内入链）', orphanRows, { suggest: () => h('span', { className: 'seo-wb-links-note-inline' }, '补充至少 1 条站内入链') }) : null,
+        h('div', { className: 'seo-wb-links-note-full' }, hint),
+      );
+    }
+
+    // Semrush: read a Semrush page through the host's local debug Chrome and
+    // (optionally) let the model turn the page text into structured tables.
+    // Everything shown here comes from the page itself or from that model
+    // pass; nothing is invented by the plugin.
+    function SemrushPanel({ report, modelReady, modelSel }) {
+      const [kind, setKind] = useState('overview');
+      const [pull, setPull] = useState({ loading: false, error: null, data: null });
+      const [parse, setParse] = useState({ loading: false, error: null, data: null, text: '', parseFailed: false });
+      const [copied, setCopied] = useState(null);
+      const [link, setLink] = useState(() => String((lsGet(LS_SETTINGS, {}) || {}).semrushUrl || ''));
+      const [keyword, setKeyword] = useState(() => String((lsGet(LS_SETTINGS, {}) || {}).semrushKeyword || ''));
+      const [competitor, setCompetitor] = useState(() => String((lsGet(LS_SETTINGS, {}) || {}).semrushCompetitor || ''));
+      const target = (report && (report.finalUrl || report.url)) || '';
+      const saveLink = (value) => {
+        const saved = lsGet(LS_SETTINGS, {}) || {};
+        lsSet(LS_SETTINGS, { ...saved, semrushUrl: value });
+      };
+      const saveField = (field, value) => {
+        const saved = lsGet(LS_SETTINGS, {}) || {};
+        lsSet(LS_SETTINGS, { ...saved, [field]: value });
+      };
+      const useActiveTab = () => {
+        postJson('/seo-workbench/api/semrush-active-tab', {})
+          .then((res) => {
+            if (res.status !== 'ok' || !res.url) throw new Error((res.error && res.error.message) || '读取当前标签失败');
+            setLink(res.url);
+            saveLink(res.url);
+          })
+          .catch((err) => setPull({ loading: false, error: (err && err.message) || '读取当前标签失败', data: null }));
+      };
+
+      const flash = (key) => {
+        setCopied(key);
+        setTimeout(() => setCopied(null), 1500);
+      };
+      const fmtVal = (value) => (value === null || value === undefined ? '—' : String(value));
+
+      const MIRROR_KINDS = { keyword: '关键词', compare: '竞品', gap: '竞品' };
+      const runPull = (nextKind, channel) => {
+        const k = nextKind || kind;
+        const useOwn = channel !== 'user-chrome';
+        const mirrorKind = !useOwn && MIRROR_KINDS[k] ? k : '';
+        const targetURL = useOwn ? target : String(link || '').trim();
+        if (!useOwn && !mirrorKind && !targetURL) {
+          setPull({ loading: false, error: '先粘贴当前打开的 Semrush / 镜像工具链接（或点「用当前标签」）。', data: null });
+          return;
+        }
+        if (mirrorKind === 'keyword' && !String(keyword || '').trim()) {
+          setPull({ loading: false, error: '先在「关键词」里填一个词（如 llm api）。', data: null });
+          return;
+        }
+        if (mirrorKind && mirrorKind !== 'keyword' && !String(competitor || '').trim()) {
+          setPull({ loading: false, error: '先在「竞品域名」里填一个域名（如 openrouter.ai）。', data: null });
+          return;
+        }
+        if (mirrorKind && mirrorKind !== 'keyword' && !target) {
+          setPull({ loading: false, error: '还没有分析目标，先做一次页面分析或站点体检。', data: null });
+          return;
+        }
+        if (!useOwn && !mirrorKind) saveLink(targetURL || target);
+        setPull({ loading: true, error: null, data: null });
+        setParse({ loading: false, error: null, data: null, text: '', parseFailed: false });
+        const payload = { url: targetURL || target, kind: k };
+        if (!useOwn) payload.channel = 'user-chrome';
+        if (mirrorKind) {
+          payload.own = target;
+          payload.competitor = String(competitor || '').trim();
+          payload.keyword = String(keyword || '').trim();
+          payload.base = targetURL;
+        }
+        postJson('/seo-workbench/api/semrush-pull', payload)
+          .then((data) => {
+            if (data.status === 'error') throw new Error((data.error && data.error.message) || '拉取 Semrush 页面失败');
+            setPull({ loading: false, error: null, data });
+          })
+          .catch((err) => setPull({ loading: false, error: (err && err.message) || '拉取 Semrush 页面失败', data: null }));
+      };
+
+      const runParse = () => {
+        const data = pull.data;
+        if (!data) return;
+        const parts = typeof modelSel === 'string' ? modelSel.split('|') : [];
+        const provider = parts[0];
+        const model = parts[1];
+        if (!provider || !model) {
+          setParse({ loading: false, error: '请先在顶部选择模型', data: null, text: '', parseFailed: false });
+          return;
+        }
+        setParse({ loading: true, error: null, data: null, text: '', parseFailed: false });
+        postJson('/seo-workbench/api/semrush-parse', {
+          url: data.href || data.url || target,
+          text: data.text || '',
+          tables: data.tables || [],
+          kind: data.kind || kind,
+          own: target,
+          competitor: String(competitor || '').trim(),
+          keyword: String(keyword || '').trim(),
+          model: { provider, model },
+        })
+          .then((res) => {
+            if (res.status !== 'ok') throw new Error((res.error && res.error.message) || '模型整理失败');
+            setParse({
+              loading: false,
+              error: null,
+              data: res.data || null,
+              text: res.text || '',
+              parseFailed: Boolean(res.parseFailed),
+            });
+          })
+          .catch((err) => setParse({ loading: false, error: (err && err.message) || '模型整理失败', data: null, text: '', parseFailed: false }));
+      };
+
+      const parseMarkdown = () => {
+        const data = parse.data;
+        if (!data) return '';
+        const lines = [];
+        lines.push('## Semrush 数据（' + target + '）');
+        if (data.overview) {
+          lines.push('', '| 指标 | 数值 |', '| --- | --- |');
+          for (const [key, label] of [
+            ['authorityScore', 'Authority Score'],
+            ['organicKeywords', '自然关键词数'],
+            ['organicTraffic', '自然流量'],
+            ['organicTrafficCost', '流量价值'],
+            ['backlinks', '外链数'],
+            ['referringDomains', '引用域名'],
+          ]) lines.push('| ' + label + ' | ' + fmtVal(data.overview[key]) + ' |');
+        }
+        if (data.competitor && data.competitor.domain) {
+          lines.push('', '| 竞品 ' + data.competitor.domain + ' | 数值 |', '| --- | --- |');
+          for (const [key, label] of [
+            ['authorityScore', 'Authority Score'],
+            ['organicKeywords', '自然关键词数'],
+            ['organicTraffic', '自然流量'],
+            ['backlinks', '外链数'],
+            ['referringDomains', '引用域名'],
+          ]) lines.push('| ' + label + ' | ' + fmtVal(data.competitor[key]) + ' |');
+        }
+        if (data.keywords && data.keywords.length) {
+          lines.push('', '| 关键词 | 排名 | 月搜索量 | 流量 | KD | 落地页 |', '| --- | --- | --- | --- | --- | --- |');
+          for (const kw of data.keywords) {
+            lines.push('| ' + kw.keyword + ' | ' + fmtVal(kw.position) + ' | ' + fmtVal(kw.volume) + ' | ' + fmtVal(kw.traffic) + ' | ' + fmtVal(kw.kd) + ' | ' + (kw.url || '') + ' |');
+          }
+        }
+        if (data.competitors && data.competitors.length) {
+          lines.push('', '| 竞品域名 | 共同关键词 | 竞争度 | 自然关键词 | 自然流量 |', '| --- | --- | --- | --- | --- |');
+          for (const c of data.competitors) {
+            lines.push('| ' + c.domain + ' | ' + fmtVal(c.commonKeywords) + ' | ' + (c.competition || '') + ' | ' + fmtVal(c.organicKeywords) + ' | ' + fmtVal(c.organicTraffic) + ' |');
+          }
+        }
+        if (data.notes && data.notes.length) {
+          lines.push('', '备注：');
+          for (const note of data.notes) lines.push('- ' + note);
+        }
+        return lines.join('\n');
+      };
+
+      const exportCsv = () => {
+        const data = parse.data;
+        if (!data || !data.keywords || !data.keywords.length) return;
+        const esc = (value) => {
+          const text = value === null || value === undefined ? '' : String(value);
+          return /[",\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
+        };
+        const rows = [['关键词', '排名', '月搜索量', '流量', 'KD', '落地页']];
+        for (const kw of data.keywords) rows.push([kw.keyword, kw.position, kw.volume, kw.traffic, kw.kd, kw.url || '']);
+        const date = new Date().toISOString().slice(0, 10);
+        downloadText('seo-semrush-' + domainOf(target) + '-' + date + '.csv', '\ufeff' + rows.map((row) => row.map(esc).join(',')).join('\n'));
+      };
+
+      const p = pull.data;
+      const d = parse.data;
+      const tables = p && Array.isArray(p.tables) ? p.tables.slice(0, 2) : [];
+
+      return h('div', { className: 'seo-wb-semrush' },
+        h('div', { className: 'seo-wb-semrush-head' },
+          h('span', { className: 'seo-wb-semrush-title' }, 'Semrush 数据'),
+          h('span', { className: 'seo-wb-semrush-note' }, '从你已登录的浏览器读取页面；工具链接会变，可从地址栏复制或点「用当前标签」'),
+        ),
+        h('div', { className: 'seo-wb-semrush-kinds' },
+          h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-ghost' + (kind === 'overview' ? ' seo-wb-semrush-kind-active' : ''), onClick: () => setKind('overview'), disabled: pull.loading }, '域名概览'),
+          h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-ghost' + (kind === 'keywords' ? ' seo-wb-semrush-kind-active' : ''), onClick: () => setKind('keywords'), disabled: pull.loading }, '自然搜索词'),
+          h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-ghost' + (kind === 'keyword' ? ' seo-wb-semrush-kind-active' : ''), onClick: () => setKind('keyword'), disabled: pull.loading }, '关键词概览'),
+          h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-ghost' + (kind === 'compare' ? ' seo-wb-semrush-kind-active' : ''), onClick: () => setKind('compare'), disabled: pull.loading }, '竞品对比'),
+          h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-ghost' + (kind === 'gap' ? ' seo-wb-semrush-kind-active' : ''), onClick: () => setKind('gap'), disabled: pull.loading }, '关键词差异'),
+          h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-ghost', onClick: () => runPull(kind, 'debug-window'), disabled: pull.loading || !target }, '独立窗口拉取'),
+          h('span', { className: 'seo-wb-semrush-target' }, target ? '分析目标：' + target : '先完成一次分析'),
+        ),
+        h('div', { className: 'seo-wb-semrush-linkrow' },
+          h('input', {
+            className: 'seo-wb-input seo-wb-semrush-link',
+            type: 'text',
+            placeholder: '粘贴浏览器里打开的工具链接（链接会变，随时更新；留空则用最近一次）',
+            value: link,
+            spellCheck: false,
+            onChange: (e) => setLink(e.target.value),
+          }),
+          h('input', {
+            className: 'seo-wb-input seo-wb-semrush-keyword',
+            type: 'text',
+            placeholder: '关键词（用于「关键词概览」，如 llm api）',
+            value: keyword,
+            spellCheck: false,
+            onChange: (e) => setKeyword(e.target.value),
+            onBlur: () => saveField('semrushKeyword', String(keyword || '').trim()),
+          }),
+          h('input', {
+            className: 'seo-wb-input seo-wb-semrush-competitor',
+            type: 'text',
+            placeholder: '竞品域名（用于「竞品对比 / 关键词差异」，如 openrouter.ai）',
+            value: competitor,
+            spellCheck: false,
+            onChange: (e) => setCompetitor(e.target.value),
+            onBlur: () => saveField('semrushCompetitor', String(competitor || '').trim()),
+          }),
+          h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-ghost', onClick: useActiveTab, disabled: pull.loading }, '用当前标签'),
+          h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-primary', onClick: () => runPull(kind, 'user-chrome'), disabled: pull.loading }, pull.loading ? '拉取中…' : (p ? '重新拉取' : '从我的浏览器拉取')),
+        ),
+        pull.loading ? h(Spinner, { label: '打开本地 Semrush 窗口并读取页面…' }) : null,
+        pull.error ? h('div', { className: 'seo-wb-error', role: 'alert' }, pull.error) : null,
+        p && p.status === 'login-required'
+          ? h('div', { className: 'seo-wb-semrush-hint' },
+              '需要登录 / 登录已过期：在浏览器里从【个人中心】重新打开工具，把新链接粘到上面（或点「用当前标签」），再点「从我的浏览器拉取」。',
+            )
+          : null,
+        p && p.status === 'ok'
+          ? h('div', { className: 'seo-wb-semrush-body' },
+              h('div', { className: 'seo-wb-semrush-page' },
+                h('a', { className: 'seo-wb-link', href: p.href, target: '_blank', rel: 'noreferrer' }, p.title || p.href || '（页面）'),
+                h('button', { className: 'seo-wb-btn seo-wb-btn-ghost seo-wb-semrush-copy', type: 'button', onClick: () => { copyText(p.text || ''); flash('text'); } }, copied === 'text' ? '已复制 ✓' : '复制页面文本'),
+              ),
+              p.browserStarted ? h('div', { className: 'seo-wb-semrush-note' }, '已打开 Semrush 窗口（调试用，用完可关闭）。') : null,
+              p.shot ? h('img', { className: 'seo-wb-semrush-shot', alt: 'Semrush 页面截图', src: 'data:image/png;base64,' + p.shot }) : null,
+              tables.length
+                ? h('div', { className: 'seo-wb-semrush-tables' },
+                    tables.map((rows, index) =>
+                      h('div', { className: 'seo-wb-semrush-table-block', key: 'table-' + index },
+                        h('div', { className: 'seo-wb-semrush-block-title' }, '页面表格 ' + (index + 1)),
+                        h('div', { className: 'seo-wb-se-table' },
+                          rows.slice(0, 12).map((row, rowIndex) =>
+                            h('div', { className: 'seo-wb-se-row', key: 'r' + rowIndex },
+                              row.map((cell, cellIndex) => h('span', { key: 'c' + cellIndex }, cell)),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  )
+                : null,
+              h('details', { className: 'seo-wb-semrush-textbox' },
+                h('summary', null, '页面文本（' + String((p.text || '').length) + ' 字）'),
+                h('pre', { className: 'seo-wb-md-pre' }, (p.text || '').slice(0, 4000)),
+              ),
+              h('div', { className: 'seo-wb-semrush-ai' },
+                h('div', { className: 'seo-wb-semrush-ai-head' },
+                  h('span', { className: 'seo-wb-semrush-block-title' }, 'AI 整理成表格'),
+                  !modelReady ? h('span', { className: 'seo-wb-semrush-hint-inline' }, '先在顶部选择模型') : null,
+                ),
+                h('div', { className: 'seo-wb-semrush-ai-actions' },
+                  h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-ghost', onClick: runParse, disabled: parse.loading || !modelReady }, parse.loading ? '整理中…' : (d ? '重新整理' : '整理成表格')),
+                  d ? h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-ghost', onClick: () => { copyText(parseMarkdown()); flash('md'); } }, copied === 'md' ? '已复制 ✓' : '复制 Markdown') : null,
+                  d && d.keywords && d.keywords.length ? h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-ghost', onClick: exportCsv }, '导出 CSV') : null,
+                ),
+                parse.loading ? h(Spinner, { label: '模型整理页面数据中…' }) : null,
+                parse.error ? h('div', { className: 'seo-wb-error', role: 'alert' }, parse.error) : null,
+                parse.parseFailed ? h('div', { className: 'seo-wb-semrush-note' }, '模型输出没有解析成功，下面是原始返回，可换个模型再试。') : null,
+                d && d.competitor && d.competitor.domain
+                  ? h('div', { className: 'seo-wb-semrush-cmpgrid' },
+                      h('div', { className: 'seo-wb-semrush-block-title' }, '竞品 ' + d.competitor.domain),
+                      h('div', { className: 'seo-wb-semrush-ovgrid' },
+                        [['自然关键词数', 'organicKeywords'], ['自然流量', 'organicTraffic'], ['Authority Score', 'authorityScore'], ['外链数', 'backlinks'], ['引用域名', 'referringDomains']].map(([label, key]) =>
+                          h('div', { className: 'seo-wb-semrush-card', key: 'c-' + key },
+                            h('div', { className: 'seo-wb-semrush-card-label' }, label),
+                            h('div', { className: 'seo-wb-semrush-card-value' }, fmtVal(d.competitor[key])),
+                          ),
+                        ),
+                      ),
+                    )
+                  : null,
+                d && d.overview
+                  ? h('div', { className: 'seo-wb-semrush-ovgrid' },
+                      [['自然关键词数', 'organicKeywords'], ['自然流量', 'organicTraffic'], ['流量价值', 'organicTrafficCost'], ['Authority Score', 'authorityScore'], ['外链数', 'backlinks'], ['引用域名', 'referringDomains']].map(([label, key]) =>
+                        h('div', { className: 'seo-wb-semrush-card', key: key },
+                          h('div', { className: 'seo-wb-semrush-card-label' }, label),
+                          h('div', { className: 'seo-wb-semrush-card-value' }, fmtVal(d.overview[key])),
+                        ),
+                      ),
+                    )
+                  : null,
+                d && d.keywords && d.keywords.length
+                  ? h('div', { className: 'seo-wb-semrush-table-block' },
+                      h('div', { className: 'seo-wb-semrush-block-title' }, '自然搜索关键词（' + d.keywords.length + '）'),
+                      h('div', { className: 'seo-wb-se-table seo-wb-semrush-kw-table' },
+                        h('div', { className: 'seo-wb-se-row seo-wb-se-head' }, ['关键词', '排名', '月搜索量', '流量', 'KD'].map((label, i) => h('span', { key: 'h' + i }, label))),
+                        d.keywords.map((kw, index) =>
+                          h('div', { className: 'seo-wb-se-row', key: 'kw' + index },
+                            h('span', { className: 'seo-wb-semrush-kw' }, kw.keyword),
+                            h('span', null, fmtVal(kw.position)),
+                            h('span', null, fmtVal(kw.volume)),
+                            h('span', null, fmtVal(kw.traffic)),
+                            h('span', null, fmtVal(kw.kd)),
+                          ),
+                        ),
+                      ),
+                    )
+                  : null,
+                d && d.competitors && d.competitors.length
+                  ? h('div', { className: 'seo-wb-semrush-table-block' },
+                      h('div', { className: 'seo-wb-semrush-block-title' }, '竞品（' + d.competitors.length + '）'),
+                      h('div', { className: 'seo-wb-se-table seo-wb-semrush-comp-table' },
+                        h('div', { className: 'seo-wb-se-row seo-wb-se-head' }, ['域名', '共同关键词', '竞争度', '自然关键词', '自然流量'].map((label, i) => h('span', { key: 'h' + i }, label))),
+                        d.competitors.map((c, index) =>
+                          h('div', { className: 'seo-wb-se-row', key: 'c' + index },
+                            h('span', { className: 'mono' }, c.domain),
+                            h('span', null, fmtVal(c.commonKeywords)),
+                            h('span', null, c.competition || '—'),
+                            h('span', null, fmtVal(c.organicKeywords)),
+                            h('span', null, fmtVal(c.organicTraffic)),
+                          ),
+                        ),
+                      ),
+                    )
+                  : null,
+                d && d.notes && d.notes.length
+                  ? h('ul', { className: 'seo-wb-semrush-notes' }, d.notes.map((note, index) => h('li', { key: 'n' + index }, note)))
+                  : null,
+                parse.text && !d
+                  ? h('pre', { className: 'seo-wb-md-pre' }, parse.text.slice(0, 4000))
+                  : null,
+              ),
+            )
+          : null,
+        !target
+          ? h('div', { className: 'seo-wb-semrush-note' }, '还没有分析目标：先在上面输入网址做一次页面分析或站点体检，再回来拉 Semrush 数据。')
+          : null,
+      );
+    }
+
+    function KeywordsSection({ keywords, onRun, report, modelReady, modelSel }) {
       const data = keywords && keywords.data;
       const loading = keywords && keywords.loading;
       const err = keywords && keywords.error;
@@ -700,6 +1866,54 @@ window.__ModuleLoader__.load({
         const s = k.search;
         return s ? `${s.clicks} 点 / ${s.impressions} 展 / 排名 ${s.position}` : null;
       };
+      const INTENT_LABELS = { informational: '信息型', commercial: '商业调研', transactional: '交易型', navigational: '导航型' };
+      const [seedText, setSeedText] = useState('');
+      const [expand, setExpand] = useState({ loading: false, error: null, data: null, done: false });
+      const [copiedKey, setCopiedKey] = useState(null);
+      const flash = (key) => {
+        setCopiedKey(key);
+        setTimeout(() => setCopiedKey((cur) => (cur === key ? null : cur)), 1500);
+      };
+      const expandRows = (expand.data && expand.data.keywords) || [];
+      const runExpand = () => {
+        if (!report) return;
+        const model = (modelSel || '').split('|');
+        if (!model[0] || !model[1]) {
+          setExpand({ loading: false, error: '请先在顶部选择模型', data: null, done: false });
+          return;
+        }
+        const seeds = seedText
+          .split(/[,，、\s]+/)
+          .map((x) => x.trim())
+          .filter(Boolean);
+        const kw = (keywords && keywords.data) || null;
+        setExpand({ loading: true, error: null, data: null, done: false });
+        postJson('/seo-workbench/api/keywords-expand', {
+          url: report.finalUrl || report.url || '',
+          seeds,
+          topKeywords: kw ? (kw.keywords || []).slice(0, 20) : [],
+          clusters: kw ? (kw.clusters || []).slice(0, 8) : [],
+          gaps: kw ? (kw.unmatchedQueries || []).slice(0, 12) : [],
+          model: { provider: model[0], model: model[1] },
+        })
+          .then((res) => {
+            if (res.status !== 'ok') throw new Error((res.error && res.error.message) || '生成失败');
+            const list = res.keywords || [];
+            setExpand({ loading: false, error: res.parseFailed ? '模型输出无法解析成 JSON，换一个模型再试' : null, data: list.length ? { keywords: list } : null, done: true });
+          })
+          .catch((e) => setExpand({ loading: false, error: (e && e.message) || '生成失败', data: null, done: true }));
+      };
+      const copyExpand = () => {
+        copyText(expandRows.map((k) => `${k.keyword}\t${INTENT_LABELS[k.intent] || k.intent}\t${k.target || ''}\t${k.note || ''}`).join('\n'));
+        flash('copy');
+      };
+      const exportKwCsv = () => {
+        const esc = (v) => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+        const head = ['关键词', '意图', '建议落点', '说明'].map(esc).join(',');
+        const body = expandRows.map((k) => [k.keyword, INTENT_LABELS[k.intent] || k.intent, k.target || '', k.note || ''].map(esc).join(','));
+        const csv = '\ufeff' + [head].concat(body).join('\r\n');
+        downloadText(`seo-keywords-${domainOf(report && (report.finalUrl || report.url)) || 'site'}-${new Date().toISOString().slice(0, 10)}.csv`, csv);
+      };
       return h(
         'div',
         { className: 'seo-wb-panel seo-wb-kw-panel' },
@@ -709,6 +1923,68 @@ window.__ModuleLoader__.load({
           h('div', { className: 'seo-wb-section-title' }, '关键词分析'),
           h('span', { className: 'seo-wb-chip' }, '站内真实词频 · 非外部搜索量'),
           h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-mini', onClick: onRun, disabled: !!loading || !report }, loading ? '分析中…' : '分析关键词'),
+        ),
+        h(
+          'div',
+          { className: 'seo-wb-kw-expand' },
+          h(
+            'div',
+            { className: 'seo-wb-kw-expand-head' },
+            h('div', { className: 'seo-wb-pages-head' }, 'AI 关键词扩展（模型生成候选词 · 不含搜索量）'),
+            modelReady ? null : h('span', { className: 'seo-wb-kw-expand-hint' }, '先在顶部选择模型'),
+          ),
+          h(
+            'div',
+            { className: 'seo-wb-kw-expand-row' },
+            h('input', {
+              className: 'seo-wb-input',
+              placeholder: '种子词（可选，逗号分隔，如：SEO 工具, 页面速度）',
+              value: seedText,
+              onChange: (e) => setSeedText(e.target.value),
+              onKeyDown: (e) => {
+                if (e.key === 'Enter' && !e.isComposing) runExpand();
+              },
+            }),
+            h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-mini', onClick: runExpand, disabled: !modelReady || !report || expand.loading }, expand.loading ? '生成中…' : '生成候选词'),
+          ),
+          expand.loading ? h(Spinner, { label: '模型生成关键词候选…' }) : null,
+          expand.error ? h('div', { className: 'seo-wb-error', role: 'alert' }, expand.error) : null,
+          expandRows.length
+            ? h(
+                'div',
+                { className: 'seo-wb-kw-expand-body' },
+                h(
+                  'div',
+                  { className: 'seo-wb-kw-expand-actions' },
+                  h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-ghost seo-wb-btn-mini', onClick: copyExpand }, copiedKey === 'copy' ? '已复制 ✓' : '复制列表'),
+                  h('button', { type: 'button', className: 'seo-wb-btn seo-wb-btn-ghost seo-wb-btn-mini', onClick: exportKwCsv }, '导出 CSV'),
+                ),
+                h(
+                  'div',
+                  { className: 'seo-wb-kw-expand-table' },
+                  h(
+                    'div',
+                    { className: 'seo-wb-kw-expand-item seo-wb-kw-expand-itemhead' },
+                    h('span', null, '关键词'),
+                    h('span', null, '意图'),
+                    h('span', null, '建议落点'),
+                    h('span', null, '说明'),
+                  ),
+                  expandRows.map((k, i) =>
+                    h(
+                      'div',
+                      { key: `${k.keyword}-${i}`, className: 'seo-wb-kw-expand-item' },
+                      h('span', { className: 'seo-wb-kw-word' }, k.keyword),
+                      h('span', { className: `seo-wb-kw-intent seo-wb-kw-intent-${k.intent}` }, INTENT_LABELS[k.intent] || k.intent),
+                      h('span', { className: k.target === '新页面' ? 'seo-wb-kw-expand-new' : 'seo-wb-kw-expand-target' }, k.target || '—'),
+                      h('span', { className: 'seo-wb-kw-expand-note' }, k.note || '—'),
+                    ),
+                  ),
+                ),
+              )
+            : expand.done && !expand.loading && !expand.error
+              ? h('div', { className: 'seo-wb-empty' }, '模型没有给出可解析的候选词，换一个模型或补种子词再试。')
+              : null,
         ),
         loading ? h(Spinner, { label: '抓取页面并提取关键词…' }) : null,
         err ? h('div', { className: 'seo-wb-error', role: 'alert' }, err) : null,
@@ -978,7 +2254,7 @@ window.__ModuleLoader__.load({
       );
     }
 
-    function SearchResult({ provider, result }) {
+    function SearchResult({ provider, result, prev }) {
       if (!result || result.status === 'error') {
         return h('div', { className: 'seo-wb-error', role: 'alert' }, mapSearchError(result && result.error));
       }
@@ -986,6 +2262,33 @@ window.__ModuleLoader__.load({
       const queries = result.queries || [];
       const pages = result.pages || [];
       const period = result.period ? `${result.period.start} ~ ${result.period.end}` : null;
+      const posOf = (q) => (typeof q.position === 'number' ? q.position : typeof q.rank === 'number' ? q.rank : null);
+      let rankRows = [];
+      let rankSummary = null;
+      if (prev && prev.status === 'ok' && Array.isArray(prev.queries) && prev.queries.length && queries.length) {
+        const prevMap = new Map();
+        for (const q of prev.queries) {
+          if (q.query) prevMap.set(q.query, q);
+        }
+        let up = 0;
+        let down = 0;
+        let flat = 0;
+        for (const q of queries) {
+          const p = q.query ? prevMap.get(q.query) : null;
+          const pp = p ? posOf(p) : null;
+          const cp = posOf(q);
+          if (pp == null || cp == null) continue;
+          const dPos = pp - cp; // positive = position number dropped = rank improved
+          const kinds = dPos > 0 ? 'up' : dPos < 0 ? 'down' : 'flat';
+          if (kinds === 'up') up += 1;
+          else if (kinds === 'down') down += 1;
+          else flat += 1;
+          rankRows.push({ query: q.query, prevPos: pp, curPos: cp, dPos, dClicks: (Number(q.clicks) || 0) - (Number(p.clicks) || 0) });
+        }
+        rankRows.sort((a, b) => Math.abs(b.dPos) - Math.abs(a.dPos));
+        rankRows = rankRows.slice(0, 10);
+        if (rankRows.length) rankSummary = { up, down, flat, total: up + down + flat };
+      }
       return h(
         'div',
         { className: 'seo-wb-search-result' },
@@ -999,6 +2302,52 @@ window.__ModuleLoader__.load({
               totals.avgCtr != null ? h('div', { className: 'seo-wb-se-total' }, h('div', { className: 'seo-wb-se-total-v' }, `${totals.avgCtr}%`), h('div', { className: 'seo-wb-se-total-l' }, '平均 CTR')) : null,
               totals.avgPosition != null ? h('div', { className: 'seo-wb-se-total' }, h('div', { className: 'seo-wb-se-total-v' }, fmtNum(totals.avgPosition)), h('div', { className: 'seo-wb-se-total-l' }, '平均排名')) : null,
               totals.queries != null ? h('div', { className: 'seo-wb-se-total' }, h('div', { className: 'seo-wb-se-total-v' }, fmtNum(totals.queries)), h('div', { className: 'seo-wb-se-total-l' }, '查询数')) : null,
+            )
+          : null,
+        rankSummary
+          ? h(
+              'div',
+              { className: 'seo-wb-se-block' },
+              h(
+                'div',
+                { className: 'seo-wb-se-block-title' },
+                '排名变化（对比上一次查询）',
+                h(
+                  'span',
+                  { className: 'seo-wb-rank-summary' },
+                  h('span', { className: 'seo-wb-delta-good' }, `上升 ${rankSummary.up}`),
+                  h('span', { className: 'seo-wb-delta-bad' }, `下降 ${rankSummary.down}`),
+                  h('span', { className: 'seo-wb-delta-flat' }, `持平 ${rankSummary.flat}`),
+                ),
+              ),
+              h(
+                'div',
+                { className: 'seo-wb-se-table seo-wb-rank-table' },
+                h(
+                  'div',
+                  { className: 'seo-wb-se-row seo-wb-se-head' },
+                  h('span', null, '查询词'),
+                  h('span', null, '上次排名'),
+                  h('span', null, '本次排名'),
+                  h('span', null, '变化'),
+                  h('span', null, '点击变化'),
+                ),
+                rankRows.map((r, i) =>
+                  h(
+                    'div',
+                    { key: i, className: 'seo-wb-se-row' },
+                    h('span', { className: 'seo-wb-se-query' }, r.query),
+                    h('span', null, fmtNum(r.prevPos)),
+                    h('span', null, fmtNum(r.curPos)),
+                    h(
+                      'span',
+                      { className: r.dPos > 0 ? 'seo-wb-delta-good' : r.dPos < 0 ? 'seo-wb-delta-bad' : 'seo-wb-delta-flat' },
+                      r.dPos > 0 ? `↑ ${r.dPos}` : r.dPos < 0 ? `↓ ${Math.abs(r.dPos)}` : '持平',
+                    ),
+                    h('span', { className: r.dClicks > 0 ? 'seo-wb-delta-good' : r.dClicks < 0 ? 'seo-wb-delta-bad' : '' }, r.dClicks > 0 ? `+${fmtNum(r.dClicks)}` : fmtNum(r.dClicks)),
+                  ),
+                ),
+              ),
             )
           : null,
         queries.length
@@ -1050,7 +2399,7 @@ window.__ModuleLoader__.load({
       );
     }
 
-    function SearchPanel({ provider, url, onProvider, onUrl, loading, result, error, code, onCode, status, gscAuthorized, onAuth, onExchange, onSearch }) {
+    function SearchPanel({ provider, url, onProvider, onUrl, loading, result, prev, error, code, onCode, status, gscAuthorized, onAuth, onExchange, onSearch }) {
       return h(
         'div',
         { className: 'seo-wb-panel seo-wb-search-panel' },
@@ -1120,7 +2469,7 @@ window.__ModuleLoader__.load({
           status ? h('div', { className: 'seo-wb-search-auth-ok' }, status) : null,
           error ? h('div', { className: 'seo-wb-error', role: 'alert' }, error) : null,
           loading ? h(Spinner, { label: provider === 'gsc' ? '查询 Search Console…' : '查询必应 Webmaster…' }) : null,
-          result ? h(SearchResult, { provider, result }) : null,
+          result ? h(SearchResult, { provider, result, prev }) : null,
         ),
       );
     }
@@ -1211,10 +2560,175 @@ window.__ModuleLoader__.load({
       );
     }
 
+    // ------------------------------------------------------------ markdown
+    // 极简自包含 Markdown 渲染器（无运行时依赖）：把 AI 回复从原始
+    // markdown 源码渲染成真实格式，样式统一走 --dsw-alias-* 设计变量。
+
+    function mdSafeHref(href) {
+      if (!href) return undefined;
+      const t = String(href).trim();
+      return /^(https?:\/\/|mailto:|#)/i.test(t) ? t : undefined;
+    }
+
+    function renderMdInline(text, key) {
+      const out = [];
+      const re = /(`[^`]+`)|(\*\*[^*]+?\*\*)|(\*[^*]+?\*)|(~~[^~]+?~~)|(\[[^\]]*\]\([^()\s]*\))|(https?:\/\/[^\s<>"')\]，。；：、！？）（]+)/g;
+      let last = 0;
+      let m;
+      let n = 0;
+      while ((m = re.exec(text))) {
+        if (m.index > last) out.push(text.slice(last, m.index));
+        const k = `${key}-${n++}`;
+        if (m[1]) out.push(h('code', { key: k, className: 'seo-wb-md-inline-code' }, m[1].slice(1, -1)));
+        else if (m[2]) out.push(h('strong', { key: k }, renderMdInline(m[2].slice(2, -2), `${key}b`)));
+        else if (m[3]) out.push(h('em', { key: k }, renderMdInline(m[3].slice(1, -1), `${key}e`)));
+        else if (m[4]) out.push(h('s', { key: k }, renderMdInline(m[4].slice(2, -2), `${key}s`)));
+        else if (m[5]) {
+          const br = m[5].indexOf('](');
+          const label = m[5].slice(1, br);
+          const href = mdSafeHref(m[5].slice(br + 2, -1));
+          out.push(href ? h('a', { key: k, href, target: '_blank', rel: 'noopener noreferrer' }, renderMdInline(label, `${key}a`)) : m[5]);
+        } else if (m[6]) out.push(h('a', { key: k, href: m[6], target: '_blank', rel: 'noopener noreferrer' }, m[6]));
+        last = m.index + m[0].length;
+      }
+      if (last < text.length) out.push(text.slice(last));
+      return out;
+    }
+
+    function renderMdListItem(text, key) {
+      const task = /^\[([ xX]?)\]\s+([\s\S]*)$/.exec(text) || /^［\s*([xX]?)\s*］\s*([\s\S]*)$/.exec(text);
+      if (task) {
+        const checked = /[xX]/.test(task[1]);
+        return h(
+          'span',
+          { key: `${key}-t` },
+          h('span', { className: 'seo-wb-md-task' + (checked ? ' seo-wb-md-task-on' : '') }, checked ? '☑' : '☐'),
+          ' ',
+          renderMdInline(task[2], `${key}-i`),
+        );
+      }
+      return renderMdInline(text, `${key}-i`);
+    }
+
+    function matchMdList(line) {
+      let m = /^(\s*)([-*+]|\d+\.)\s+(.*)$/.exec(line);
+      if (m) return { indent: m[1].length, ordered: /\d+\./.test(m[2]), text: m[3] };
+      m = /^(\s*)-([\[［].*)$/.exec(line);
+      if (m) return { indent: m[1].length, ordered: false, text: m[2] };
+      return null;
+    }
+
+    function isMdParaStop(line) {
+      if (/^\s*$/.test(line)) return true;
+      if (/^(#{1,6})\s+/.test(line)) return true;
+      if (/^\s*```/.test(line)) return true;
+      if (/^\s*>\s?/.test(line)) return true;
+      if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) return true;
+      if (matchMdList(line)) return true;
+      if (/^\s*\|/.test(line)) return true;
+      return false;
+    }
+
+    function Markdown({ text, className }) {
+      const lines = String(text == null ? '' : text).replace(/\r\n?/g, '\n').split('\n');
+      const blocks = [];
+      let i = 0;
+      let key = 0;
+      const splitRow = (line) => line.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map((s) => s.trim());
+      while (i < lines.length) {
+        const line = lines[i];
+        if (/^\s*```/.test(line)) {
+          const buf = [];
+          i += 1;
+          while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) {
+            buf.push(lines[i]);
+            i += 1;
+          }
+          i += 1;
+          blocks.push(h('pre', { key: key++ }, h('code', { className: 'seo-wb-md-pre' }, buf.join('\n'))));
+          continue;
+        }
+        const hd = /^(#{1,6})\s+(.*)$/.exec(line);
+        if (hd) {
+          blocks.push(h('h' + hd[1].length, { key: key++ }, renderMdInline(hd[2], `${key}h`)));
+          i += 1;
+          continue;
+        }
+        if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+          blocks.push(h('hr', { key: key++ }));
+          i += 1;
+          continue;
+        }
+        if (/^\s*>\s?/.test(line)) {
+          const buf = [];
+          while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
+            buf.push(lines[i].replace(/^\s*>\s?/, ''));
+            i += 1;
+          }
+          blocks.push(h('blockquote', { key: key++ }, renderMdInline(buf.join(' '), `${key}q`)));
+          continue;
+        }
+        if (/^\s*\|/.test(line) && i + 1 < lines.length && /^\s*\|?[\s:\-|]+\|?\s*$/.test(lines[i + 1]) && lines[i + 1].includes('-')) {
+          const header = splitRow(line);
+          const rows = [];
+          i += 2;
+          while (i < lines.length && /^\s*\|/.test(lines[i])) {
+            rows.push(splitRow(lines[i]));
+            i += 1;
+          }
+          blocks.push(
+            h(
+              'table',
+              { key: key++, className: 'seo-wb-md-table' },
+              h('thead', null, h('tr', null, header.map((c, j) => h('th', { key: j }, renderMdInline(c, `${key}th${j}`))))),
+              h('tbody', null, rows.map((r, j) => h('tr', { key: j }, r.map((c, k2) => h('td', { key: k2 }, renderMdInline(c, `${key}td${j}-${k2}`)))))),
+            ),
+          );
+          continue;
+        }
+        const li0 = matchMdList(line);
+        if (li0) {
+          const items = [];
+          while (i < lines.length) {
+            const lm = matchMdList(lines[i]);
+            if (!lm) break;
+            if (lm.indent > li0.indent + 1 && items.length) {
+              items[items.length - 1].text += '\n' + lines[i].replace(/^\s+/, '');
+              i += 1;
+              continue;
+            }
+            items.push({ text: lm.text });
+            i += 1;
+          }
+          blocks.push(
+            h(
+              li0.ordered ? 'ol' : 'ul',
+              { key: key++ },
+              items.map((it, j) => h('li', { key: j }, renderMdListItem(it.text, `${key}li${j}`))),
+            ),
+          );
+          continue;
+        }
+        if (/^\s*$/.test(line)) {
+          i += 1;
+          continue;
+        }
+        const buf = [line];
+        i += 1;
+        while (i < lines.length && !isMdParaStop(lines[i])) {
+          buf.push(lines[i]);
+          i += 1;
+        }
+        blocks.push(h('p', { key: key++ }, renderMdInline(buf.join(' '), `${key}p`)));
+      }
+      return h('div', { className: 'seo-wb-md' + (className ? ' ' + className : '') }, ...blocks);
+    }
+
     // ---------------------------------------------------------------- chat
 
     function ChatPanel({ chat, modelReady, onSend, onClear, compact }) {
       const [draft, setDraft] = useState('');
+      const [copiedKey, setCopiedKey] = useState(null);
       const listRef = React.useRef(null);
       useEffect(() => {
         const el = listRef.current;
@@ -1225,6 +2739,13 @@ window.__ModuleLoader__.load({
         if (!text || chat.loading) return;
         setDraft('');
         onSend(text);
+      };
+      const copyChat = (index) => {
+        const m = chat.messages[index];
+        if (!m || !m.content) return;
+        copyText(m.content);
+        setCopiedKey(index);
+        setTimeout(() => setCopiedKey(null), 1500);
       };
       const hints = chat.messages.length ? [] : ['这份报告最关键的问题是什么？', '按优先级给我一份修复清单', '怎么提升这个站点的排名？'];
       return h(
@@ -1245,7 +2766,29 @@ window.__ModuleLoader__.load({
                 h(
                   'div',
                   { key: i, className: `seo-wb-chat-row ${m.role === 'user' ? 'seo-wb-chat-user' : 'seo-wb-chat-ai'}` },
-                  h('div', { className: 'seo-wb-chat-bubble' }, m.content || (chat.loading && i === chat.messages.length - 1 ? '思考中…' : '')),
+                  m.role === 'user'
+                    ? h('div', { className: 'seo-wb-chat-bubble' }, m.content || '')
+                    : h(
+                        'div',
+                        { className: 'seo-wb-chat-ai-col' },
+                        h(
+                          'div',
+                          { className: 'seo-wb-chat-bubble seo-wb-chat-md' },
+                          h(Markdown, { text: m.content || (chat.loading && i === chat.messages.length - 1 ? '思考中…' : '') }),
+                        ),
+                        m.content
+                          ? h(
+                              'button',
+                              {
+                                type: 'button',
+                                className: 'seo-wb-btn seo-wb-btn-ghost seo-wb-chat-copy',
+                                onClick: () => copyChat(i),
+                                'aria-label': '复制这条回复',
+                              },
+                              copiedKey === i ? '已复制 ✓' : '复制',
+                            )
+                          : null,
+                      ),
                 ),
               )
             : h('div', { className: 'seo-wb-chat-empty' }, modelReady ? '直接问我关于这个站点的问题 —— 当前的分析数据会自动作为上下文。' : '先在上方选择一个模型，然后就可以开始对话了。'),
@@ -1387,22 +2930,40 @@ window.__ModuleLoader__.load({
     // ---------------------------------------------------------------- main
 
     function SeoWorkbenchBody() {
-      const [input, setInput] = useState('');
-      const [mode, setMode] = useState('page'); // 'page' | 'site'
+      // The panel is unmounted whenever the user switches to a conversation,
+      // so the whole view is restored from localStorage on every mount.
+      const savedViewRef = useRef(null);
+      if (savedViewRef.current === null) savedViewRef.current = readView();
+      const sv = savedViewRef.current || {};
+      const svRecord = (value) => (value && typeof value === 'object' ? value : null);
+      const svReport = svRecord(sv.report);
+      const svDeep = svRecord(sv.deep);
+      const svAdvice = svRecord(sv.advice);
+      const svSchema = svRecord(sv.schema);
+      const svFix = svRecord(sv.fix);
+      const svKeywords = svRecord(sv.keywords);
+      const svCrux = svRecord(sv.crux);
+      const svSearch = svRecord(sv.search);
+      const svIndex = svRecord(sv.indexStatus);
+      const TAB_IDS = ['issues', 'chat', 'details', 'schema', 'overview', 'diff', 'links', 'keywords', 'search', 'index', 'semrush', 'perf', 'fix', 'advice'];
+      const [input, setInput] = useState(sv.input || '');
+      const [mode, setMode] = useState(sv.mode === 'site' ? 'site' : 'page'); // 'page' | 'site'
       const [busy, setBusy] = useState(null);
       const [progress, setProgress] = useState(null);
-      const [report, setReport] = useState(null);
-      const [deep, setDeep] = useState(null);
-      const [advice, setAdvice] = useState({ loading: false, text: '', error: null });
-      const [keywords, setKeywords] = useState({ loading: false, error: null, data: null });
-      const [crux, setCrux] = useState(null); // {loading} | {status:'ok',data:{...}} | {status:'error',error}
-      const [search, setSearch] = useState({ provider: 'gsc', loading: false, result: null, error: null, code: '', status: '' });
+      const [report, setReport] = useState(() => svReport);
+      const [deep, setDeep] = useState(() => svDeep);
+      const [advice, setAdvice] = useState(() => (svAdvice ? { loading: false, text: svAdvice.text || '', error: null } : { loading: false, text: '', error: null }));
+      const [schema, setSchema] = useState(() => (svSchema ? { loading: false, error: null, data: svSchema.data || null } : { loading: false, error: null, data: null }));
+      const [fix, setFix] = useState(() => (svFix ? { loading: false, error: null, pages: svFix.pages || [], text: svFix.text || '' } : { loading: false, error: null, pages: [], text: '' }));
+      const [keywords, setKeywords] = useState(() => (svKeywords ? { loading: false, error: null, data: svKeywords.data || null } : { loading: false, error: null, data: null }));
+      const [crux, setCrux] = useState(() => svCrux); // {loading} | {status:'ok',data:{...}} | {status:'error',error}
+      const [search, setSearch] = useState(() => ({ provider: (svSearch && svSearch.provider) || 'gsc', loading: false, result: (svSearch && svSearch.result) || null, prev: (svSearch && svSearch.prev) || null, error: null, code: (svSearch && svSearch.code) || '', status: (svSearch && svSearch.status) || '' }));
       const [gscToken, setGscToken] = useState(() => lsGet(LS_GSC, {}));
       const [searchUrl, setSearchUrl] = useState('');
-      const [indexStatus, setIndexStatus] = useState({ loading: false, error: null, data: null });
-      const [chat, setChat] = useState(() => { const saved = lsGet(LS_CHAT, []); return { messages: Array.isArray(saved) ? saved : [], loading: false, error: null }; });
+      const [indexStatus, setIndexStatus] = useState(() => (svIndex ? { loading: false, error: null, data: svIndex.data || null } : { loading: false, error: null, data: null }));
+      const [chat, setChat] = useState({ messages: [], loading: false, error: null }); // per analysis record, loaded below
       const [error, setError] = useState(null);
-      const [tab, setTab] = useState('issues');
+      const [tab, setTab] = useState(() => (TAB_IDS.indexOf(sv.tab) >= 0 ? sv.tab : 'issues'));
       const [openIssue, setOpenIssue] = useState(null);
       const [openGroup, setOpenGroup] = useState(null);
       const [copied, setCopied] = useState(null);
@@ -1427,11 +2988,41 @@ window.__ModuleLoader__.load({
         // eslint-disable-next-line react-hooks/exhaustive-deps
       }, []);
 
-      // Keep the embedded chat across panel switches.
+      // Each analysis record owns its conversation: the chat tab only ever
+      // shows the messages saved on the open report's history entry, so
+      // analysis #a's conversation never bleeds into analysis #b.
+      const openEntryId = reportEntryId(report);
       useEffect(() => {
-        lsSet(LS_CHAT, chat.messages.slice(-40));
+        if (!openEntryId) {
+          setChat({ messages: [], loading: false, error: null });
+          return;
+        }
+        const entry = histAll().find((item) => item.id === openEntryId);
+        const saved = entry && entry.chat && Array.isArray(entry.chat.messages) ? entry.chat.messages : [];
+        setChat({ messages: saved.slice(-40), loading: false, error: null });
         // eslint-disable-next-line react-hooks/exhaustive-deps
-      }, [chat.messages]);// Panel open ⇔ seo_* agent tools visible to the chat agent; panel closed
+      }, [openEntryId]);
+      // Mirror the conversation onto the open record. Skip the streaming middle
+      // (an assistant bubble that is still being filled token by token); the
+      // question is saved as soon as it is sent and the answer when it lands.
+      const chatSaveTimer = useRef(null);
+      useEffect(() => {
+        if (!openEntryId) return undefined;
+        const last = chat.messages[chat.messages.length - 1];
+        if (chat.loading && !(last && last.role === 'user')) return undefined;
+        clearTimeout(chatSaveTimer.current);
+        if (last && last.role === 'user') {
+          // Persist the question immediately: switching records (or panels)
+          // before the debounce fires must not lose it.
+          patchHistory(openEntryId, { chat: { messages: chat.messages.slice(-40) } });
+          return undefined;
+        }
+        chatSaveTimer.current = setTimeout(() => {
+          patchHistory(openEntryId, { chat: { messages: chat.messages.slice(-40) } });
+        }, 400);
+        return () => clearTimeout(chatSaveTimer.current);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [chat.messages, chat.loading, openEntryId]);// Panel open ⇔ seo_* agent tools visible to the chat agent; panel closed
       // ⇔ tools vanish (host `when` gate). Fire-and-forget POSTs.
       useEffect(() => {
         postJson('/seo-workbench/api/tools/scope', { enabled: true }).catch(() => {});
@@ -1469,7 +3060,7 @@ window.__ModuleLoader__.load({
       }, [modelSel]);
 
       useEffect(() => {
-        if (!busy || busy === 'advice') {
+        if (!busy || busy === 'advice' || busy === 'fix') {
           setProgress(null);
           return undefined;
         }
@@ -1482,88 +3073,161 @@ window.__ModuleLoader__.load({
         return () => clearInterval(timer);
       }, [busy]);
 
+      // Mirror the whole view into localStorage so a panel switch (which
+      // unmounts this component) does not wipe the user's report and inputs.
+      const viewSaveTimer = useRef(null);
+      useEffect(() => {
+        clearTimeout(viewSaveTimer.current);
+        viewSaveTimer.current = setTimeout(() => {
+          writeView({ input, mode, tab, report, deep, advice, schema, fix, crux, keywords, search, indexStatus });
+        }, 300);
+        return () => clearTimeout(viewSaveTimer.current);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [input, mode, tab, report, deep, advice, schema, fix, crux, keywords, search, indexStatus]);
+
+      // Follow the module-scope RUNNING registry: a task started here keeps
+      // running across unmounts; on remount we resume busy/progress and apply
+      // the settled result exactly once.
+      const [task, setTask] = useState(() => (RUNNING.task ? { ...RUNNING.task } : null));
+      useEffect(() => RUNNING.subscribe(setTask), []);
+      useEffect(() => {
+        if (!task) return;
+        if (!task.settled) {
+          // Give the tab's own panel a loading state the moment the task
+          // starts, so a click never looks inert.
+          if (task.kind === 'schema') setSchema({ loading: true, error: null, data: null });
+          else if (task.kind === 'fix') setFix({ loading: true, error: null, pages: [], text: '' });
+          else if (task.kind === 'advice') setAdvice({ loading: true, text: '', error: null });
+          else setBusy(task.kind);
+          return;
+        }
+        if (task.applied) return;
+        task.applied = true;
+        applyTask(task.kind, task.result, task.error);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [task]);
+
       function pushHistory(entry) {
-        setHistory((prev) => {
-          const next = [entry, ...prev.filter((x) => x.id !== entry.id)];
-          // History is grouped as projects (one per site): newest 10 runs per site,
-          // 100 runs total as a safety cap.
-          const perSite = new Map();
-          const kept = [];
-          for (const item of next) {
-            const site = domainOf(item.url) || item.url;
-            const seen = perSite.get(site) || 0;
-            if (seen >= 10) continue;
-            perSite.set(site, seen + 1);
-            kept.push(item);
-          }
-          return kept.slice(0, 100);
-        });
+        // Module-scope helper: writes localStorage immediately, so an entry
+        // created by a task that finishes after unmount is still recorded.
+        setHistory(histUpsert(entry));
       }
       // Deep-check and AI advice complete AFTER the audit created the entry, so
       // they are merged into the stored entry by its id instead of creating a new one.
       function patchHistory(id, patch) {
-        setHistory((prev) => prev.map((entry) => (entry.id === id ? { ...entry, ...patch } : entry)));
+        setHistory(histPatch(id, patch));
       }
       function reportEntryId(reportValue) {
         return reportValue ? `${reportValue.fetchedAt}-${reportValue.url}` : null;
       }
 
-      async function runAudit() {
+      // Result appliers run from the task sync effect: they fire whether the
+      // request finished while this component was mounted or after a remount —
+      // the RUNNING registry carries the result across unmounts.
+      function applyReport(data) {
+        setReport(data);
+        setDeep(null);
+        setCrux(null);
+        setKeywords({ loading: false, error: null, data: null });
+        setIndexStatus({ loading: false, error: null, data: null });
+        setSearch((s) => ({ ...s, result: null, error: null, status: '', code: '' }));
+        setAdvice({ loading: false, text: '', error: null });
+        setSchema({ loading: false, error: null, data: null });
+        setFix({ loading: false, error: null, pages: [], text: '' });
+        setTab('issues');
+        setOpenIssue(null);
+        setOpenGroup(null);
+        setBusy(null);
+        setHistory(histUpsert(histEntry(data)));
+      }
+      function applyDeepResult(data) {
+        setBusy(null);
+        if (data && data.status === 'error') {
+          // Keep the structured error (hint included) so DeepSection can
+          // render the precise guidance instead of a bare string.
+          setDeep({ status: 'error', error: data.error || { message: '深度检测失败' } });
+          setError(mapDeepError(data.error));
+          return;
+        }
+        setDeep(data);
+        const entryId = reportEntryId(report);
+        if (entryId) patchHistory(entryId, { deep: data });
+      }
+      function applyAdviceResult(data) {
+        setBusy(null);
+        setAdvice({ loading: false, text: (data && data.text) || '', error: null });
+        const entryId = reportEntryId(report);
+        if (entryId) patchHistory(entryId, { advice: { text: (data && data.text) || '', model: modelSel } });
+      }
+      function applySchemaResult(data) {
+        setSchema({ loading: false, error: null, data });
+        const entryId = reportEntryId(report);
+        if (entryId) patchHistory(entryId, { schema: data });
+      }
+      function applyFixResult(data) {
+        setBusy(null);
+        setFix({ loading: false, error: null, pages: (data && data.pages) || [], text: (data && data.text) || '' });
+        const entryId = reportEntryId(report);
+        if (entryId) patchHistory(entryId, { fix: { pages: (data && data.pages) || [], text: (data && data.text) || '' } });
+      }
+      function applyTask(kind, result, error) {
+        if (error) {
+          const message = (error && error.message) || String(error || '请求失败');
+          if (kind === 'schema') setSchema({ loading: false, error: message, data: null });
+          else if (kind === 'advice') setAdvice({ loading: false, text: '', error: message });
+          else if (kind === 'fix') setFix({ loading: false, error: message, pages: [], text: '' });
+          else if (kind === 'deep') {
+            setDeep({ status: 'error', error: { message } });
+            setError(message);
+          } else setError(message);
+          setBusy(null);
+          RUNNING.finish(kind);
+          return;
+        }
+        if (kind === 'audit' || kind === 'site') applyReport(result);
+        else if (kind === 'deep') applyDeepResult(result);
+        else if (kind === 'advice') applyAdviceResult(result);
+        else if (kind === 'schema') applySchemaResult(result);
+        else if (kind === 'fix') applyFixResult(result);
+        RUNNING.finish(kind);
+      }
+
+      function runAudit() {
+        if (RUNNING.task && !RUNNING.task.settled) return;
         const { url, error: urlError } = normalizeUrl(input);
         if (urlError) {
           setError(urlError);
           return;
         }
-        setBusy('audit');
         setError(null);
-        try {
-          const data = await postJson('/seo-workbench/api/audit', {
+        // The request lives in module scope (RUNNING): switching panels
+        // unmounts this component but the audit keeps running, and the result
+        // is applied when the panel comes back.
+        RUNNING.begin(
+          'audit',
+          postJson('/seo-workbench/api/audit', {
             url,
             fetchTimeoutMs: Number(settings.timeoutMs) || 15000,
             maxRedirects: Number(settings.maxRedirects) || 5,
-          });
-          if (data.status === 'error') throw new Error((data.error && data.error.message) || '审计失败');
-          setReport(data);
-          setDeep(null);
-          setCrux(null);
-          setKeywords({ loading: false, error: null, data: null });
-          setIndexStatus({ loading: false, error: null, data: null });
-          setSearch((s) => ({ ...s, result: null, error: null, status: '', code: '' }));
-          setAdvice({ loading: false, text: '', error: null });
-          setTab('issues');
-          setOpenIssue(null);
-          setOpenGroup(null);
-          pushHistory({
-            id: `${data.fetchedAt}-${data.url}`,
-            url: data.url,
-            finalUrl: data.finalUrl,
-            fetchedAt: data.fetchedAt,
-            score: data.score && data.score.total,
-            report: data,
-            deep: null,
-            advice: null,
-            crux: null,
-            search: null,
-            keywords: null,
-            index: null,
-          });
-        } catch (err) {
-          setError(err.message || String(err));
-        } finally {
-          setBusy(null);
-        }
+          }).then((data) => {
+            if (data.status === 'error') throw new Error((data.error && data.error.message) || '审计失败');
+            return data;
+          }),
+          persistReportResult,
+        );
       }
 
-      async function runSiteAudit() {
+      function runSiteAudit() {
+        if (RUNNING.task && !RUNNING.task.settled) return;
         const { url, error: urlError } = normalizeUrl(input);
         if (urlError) {
           setError(urlError);
           return;
         }
-        setBusy('site');
         setError(null);
-        try {
-          const data = await postJson('/seo-workbench/api/site-audit', {
+        RUNNING.begin(
+          'site',
+          postJson('/seo-workbench/api/site-audit', {
             url,
             fetchTimeoutMs: Number(settings.timeoutMs) || 15000,
             maxRedirects: Number(settings.maxRedirects) || 5,
@@ -1571,38 +3235,12 @@ window.__ModuleLoader__.load({
             includePattern: String(settings.includePattern || '').trim(),
             excludePattern: String(settings.excludePattern || '').trim(),
             pathQuotas: String(settings.pathQuotas || '').trim(),
-          });
-          if (data.status === 'error') throw new Error((data.error && data.error.message) || '站点体检失败');
-          setReport(data);
-          setDeep(null);
-          setCrux(null);
-          setKeywords({ loading: false, error: null, data: null });
-          setIndexStatus({ loading: false, error: null, data: null });
-          setSearch((s) => ({ ...s, result: null, error: null, status: '', code: '' }));
-          setAdvice({ loading: false, text: '', error: null });
-          setTab('issues');
-          setOpenIssue(null);
-          setOpenGroup(null);
-          pushHistory({
-            id: `${data.fetchedAt}-${data.url}`,
-            url: data.url,
-            finalUrl: data.finalUrl,
-            fetchedAt: data.fetchedAt,
-            score: data.score && data.score.total,
-            mode: 'site',
-            report: data,
-            deep: null,
-            advice: null,
-            crux: null,
-            search: null,
-            keywords: null,
-            index: null,
-          });
-        } catch (err) {
-          setError(err.message || String(err));
-        } finally {
-          setBusy(null);
-        }
+          }).then((data) => {
+            if (data.status === 'error') throw new Error((data.error && data.error.message) || '站点体检失败');
+            return data;
+          }),
+          persistReportResult,
+        );
       }
 
       function startAnalyze() {
@@ -1611,45 +3249,32 @@ window.__ModuleLoader__.load({
         else runAudit();
       }
 
-      async function runDeep() {
+      function runDeep() {
+        if (RUNNING.task && !RUNNING.task.settled) return;
         const { url, error: urlError } = normalizeUrl(input);
         if (urlError) {
           setError(urlError);
           return;
         }
-        setBusy('deep');
         setError(null);
-        try {
-          const data = await postJson('/seo-workbench/api/deep', { url, psiKey: settings.psiKey || undefined });
-          if (data.status === 'error') {
-            // Keep the structured error (hint included) so DeepSection can
-            // render the precise guidance instead of a bare string.
-            setDeep({ status: 'error', error: data.error || { message: '深度检测失败' } });
-            setError(mapDeepError(data.error));
-            return;
-          }
-          setDeep(data);
-          const entryId = reportEntryId(report);
-          if (entryId) patchHistory(entryId, { deep: data });
-        } catch (err) {
-          setError(err.message || String(err));
-        } finally {
-          setBusy(null);
-        }
+        // The deep check resolves with a status:'error' payload rather than
+        // throwing; applyDeepResult keeps its structured hint.
+        RUNNING.begin('deep', postJson('/seo-workbench/api/deep', { url, psiKey: settings.psiKey || undefined }), persistDeepResult);
       }
 
-      async function runAdvice() {
+      function runAdvice() {
+        if (RUNNING.task && !RUNNING.task.settled) return;
         if (!report) return;
         const [provider, model] = String(modelSel || '').split('|');
         if (!provider || !model) {
           setError('请先在顶部选择模型');
           return;
         }
-        setBusy('advice');
         setError(null);
-        setAdvice({ loading: true, text: '', error: null });
-        try {
-          const data = await postJson('/seo-workbench/api/advice', {
+        const currentModel = modelSel;
+        RUNNING.begin(
+          'advice',
+          postJson('/seo-workbench/api/advice', {
             url: report.url,
             report: {
               score: report.score,
@@ -1666,16 +3291,58 @@ window.__ModuleLoader__.load({
             search: search && search.result && search.result.status === 'ok' ? { result: search.result } : null,
             keywords: keywords && keywords.data && keywords.data.status === 'ok' ? keywords.data : null,
             model: { provider, model },
-          });
-          if (data.status === 'error') throw new Error((data.error && data.error.message) || 'AI 建议失败');
-          setAdvice({ loading: false, text: data.text || '', error: null });
-          const entryId = reportEntryId(report);
-          if (entryId) patchHistory(entryId, { advice: { text: data.text || '', model: modelSel } });
-        } catch (err) {
-          setAdvice({ loading: false, text: '', error: err.message || String(err) });
-        } finally {
-          setBusy(null);
+          }).then((data) => {
+            if (data.status === 'error') throw new Error((data.error && data.error.message) || 'AI 建议失败');
+            return data;
+          }),
+          (data) => persistAdviceResult(data, currentModel),
+        );
+      }
+
+      function runSchema() {
+        if (RUNNING.task && !RUNNING.task.settled) return;
+        if (!report) return;
+        RUNNING.begin(
+          'schema',
+          postJson('/seo-workbench/api/schema', {
+            url: report.finalUrl || report.url,
+            fetchTimeoutMs: Number(settings.timeoutMs) || 15000,
+            maxRedirects: Number(settings.maxRedirects) || 5,
+          }).then((data) => {
+            if (data.status === 'error') throw new Error((data.error && data.error.message) || '结构化数据检测失败');
+            return data;
+          }),
+          persistSchemaResult,
+        );
+      }
+
+      function runFixPlan() {
+        if (RUNNING.task && !RUNNING.task.settled) return;
+        if (!report) return;
+        const [provider, model] = String(modelSel || '').split('|');
+        if (!provider || !model) {
+          setError('请先在顶部选择模型');
+          return;
         }
+        setError(null);
+        RUNNING.begin(
+          'fix',
+          postJson('/seo-workbench/api/fixplan', {
+            url: report.finalUrl || report.url,
+            report: {
+              mode: report.mode,
+              score: report.score,
+              issues: report.issues,
+              pages: (report.pages || []).filter((p) => p.failed || p.noindex || p.thin || p.dupTitle || p.dupDesc || p.orphan || p.missingH1 || p.missingTitle || p.missingDesc || p.missingCanonical).slice(0, 10),
+              page: report.mode === 'site' ? undefined : report.page,
+            },
+            model: { provider, model },
+          }).then((data) => {
+            if (data.status === 'error') throw new Error((data.error && data.error.message) || 'AI 修复清单生成失败');
+            return data;
+          }),
+          persistFixResult,
+        );
       }
 
       async function runCruxField() {
@@ -1771,6 +3438,7 @@ window.__ModuleLoader__.load({
             setSearch((s) => ({ ...s, error: '需要先完成 Google 授权（点「获取授权链接」）。' }));
             return;
           }
+          const prevSnap = search.result && search.result.status === 'ok' ? search.result : null;
           setSearch((s) => ({ ...s, loading: true, result: null, error: null }));
           try {
             const data = await postJson('/seo-workbench/api/gsc/search', {
@@ -1790,24 +3458,25 @@ window.__ModuleLoader__.load({
             if (data.status !== 'ok') {
               setSearch((s) => ({ ...s, loading: false, result: null, error: mapSearchError(data.error) }));
             } else {
-              setSearch((s) => ({ ...s, loading: false, result: data }));
+              setSearch((s) => ({ ...s, loading: false, result: data, prev: prevSnap }));
               const entryId = reportEntryId(report);
-              if (entryId) patchHistory(entryId, { search: { provider: 'gsc', result: data } });
+              if (entryId) patchHistory(entryId, { search: { provider: 'gsc', result: data, prev: prevSnap } });
             }
           } catch (err) {
             setSearch((s) => ({ ...s, loading: false, result: null, error: err.message || String(err) }));
           }
           return;
         }
+        const prevSnap = search.result && search.result.status === 'ok' ? search.result : null;
         setSearch((s) => ({ ...s, loading: true, result: null, error: null }));
         try {
           const data = await postJson('/seo-workbench/api/bing', { url, apiKey: String(settings.bingApiKey || '').trim() || undefined });
           if (data.status !== 'ok') {
             setSearch((s) => ({ ...s, loading: false, result: null, error: mapSearchError(data.error) }));
           } else {
-            setSearch((s) => ({ ...s, loading: false, result: data }));
+            setSearch((s) => ({ ...s, loading: false, result: data, prev: prevSnap }));
             const entryId = reportEntryId(report);
-            if (entryId) patchHistory(entryId, { search: { provider: 'bing', result: data } });
+            if (entryId) patchHistory(entryId, { search: { provider: 'bing', result: data, prev: prevSnap } });
           }
         } catch (err) {
           setSearch((s) => ({ ...s, loading: false, result: null, error: err.message || String(err) }));
@@ -2000,7 +3669,7 @@ window.__ModuleLoader__.load({
         setAdvice({ loading: false, text: '', error: null });
         setCrux(null);
         setKeywords({ loading: false, error: null, data: null });
-        setSearch({ provider: 'gsc', url: '', loading: false, result: null, error: null, code: '', status: '' });
+        setSearch({ provider: 'gsc', url: '', loading: false, result: null, prev: null, error: null, code: '', status: '' });
         setSearchUrl('');
         setIndexStatus({ loading: false, error: null, data: null });
         setTab('issues');
@@ -2021,6 +3690,7 @@ window.__ModuleLoader__.load({
           provider: (entry.search && entry.search.provider) || 'gsc',
           loading: false,
           result: (entry.search && entry.search.result) || null,
+          prev: (entry.search && entry.search.prev) || null,
           error: null,
           code: '',
           status: '',
@@ -2028,6 +3698,8 @@ window.__ModuleLoader__.load({
         setSearchUrl(entry.url);
         setIndexStatus({ loading: false, error: null, data: entry.index || null });
         setAdvice({ loading: false, text: (entry.advice && entry.advice.text) || '', error: null });
+        setSchema({ loading: false, error: null, data: entry.schema || null });
+        setFix({ loading: false, error: null, pages: (entry.fix && entry.fix.pages) || [], text: (entry.fix && entry.fix.text) || '' });
         setTab('issues');
         setOpenIssue(null);
         setOpenGroup(null);
@@ -2035,11 +3707,11 @@ window.__ModuleLoader__.load({
       }
       function exportMd() {
         if (!report) return;
-        downloadText(`seo-report-${domainOf(report.url)}-${new Date().toISOString().slice(0, 10)}.md`, buildMarkdown(report, deep, advice.text, cruxOk, searchOk, keywordsOk, indexStatus && indexStatus.data ? { data: indexStatus.data } : null));
+        downloadText(`seo-report-${domainOf(report.url)}-${new Date().toISOString().slice(0, 10)}.md`, buildMarkdown(report, deep, advice.text, cruxOk, searchOk, keywordsOk, indexStatus && indexStatus.data ? { data: indexStatus.data } : null, { schema: schema && schema.data ? { data: schema.data } : null, fix: fix && (fix.pages || []).length ? fix : null }));
       }
       function copyMd() {
         if (!report) return;
-        copyText(buildMarkdown(report, deep, advice.text, cruxOk, searchOk, keywordsOk, indexStatus && indexStatus.data ? { data: indexStatus.data } : null));
+        copyText(buildMarkdown(report, deep, advice.text, cruxOk, searchOk, keywordsOk, indexStatus && indexStatus.data ? { data: indexStatus.data } : null, { schema: schema && schema.data ? { data: schema.data } : null, fix: fix && (fix.pages || []).length ? fix : null }));
         setCopied('md');
         setTimeout(() => setCopied(null), 1500);
       }
@@ -2070,7 +3742,48 @@ window.__ModuleLoader__.load({
         }
         return [...map.values()];
       })();
-      const tabLabel = (id) => (id === 'issues' ? `问题（${issueCount}）` : id === 'details' ? '检查明细' : id === 'overview' ? (isSiteReport ? '站点概览' : '页面概况') : id === 'keywords' ? '关键词' : id === 'search' ? '搜索数据' : id === 'index' ? '索引状态' : id === 'perf' ? '性能检测' : id === 'advice' ? 'AI 建议' : '对话');
+      const tabLabel = (id) => (id === 'issues' ? `问题（${issueCount}）` : id === 'details' ? '检查明细' : id === 'overview' ? (isSiteReport ? '站点概览' : '页面概况') : id === 'diff' ? '对比' : id === 'links' ? '链接修复' : id === 'semrush' ? 'Semrush' : id === 'schema' ? '结构化数据' : id === 'keywords' ? '关键词' : id === 'search' ? '搜索数据' : id === 'index' ? '索引状态' : id === 'perf' ? '性能检测' : id === 'fix' ? 'AI 修复' : id === 'advice' ? 'AI 建议' : '对话');
+      // Immediate per-tab feedback: the tab itself carries a spinner while its
+      // own task runs, an error mark when it failed, and a check once data has
+      // landed — so clicking a tab never leaves you guessing about state.
+      const tabState = (id) => {
+        if (id === 'schema') return schema.loading ? 'run' : schema.error ? 'err' : schema.data ? 'ok' : null;
+        if (id === 'keywords') return keywords.loading ? 'run' : keywords.error ? 'err' : keywords.data ? 'ok' : null;
+        if (id === 'search') return search.loading ? 'run' : search.error ? 'err' : search.result ? 'ok' : null;
+        if (id === 'index') return indexStatus.loading ? 'run' : indexStatus.error ? 'err' : indexStatus.data ? 'ok' : null;
+        if (id === 'perf') {
+          if (busy === 'deep' || (crux && crux.loading)) return 'run';
+          if ((deep && deep.status === 'error') || (crux && crux.status === 'error')) return 'err';
+          if (deep || (crux && crux.status === 'ok')) return 'ok';
+          return null;
+        }
+        if (id === 'fix') return fix.loading ? 'run' : fix.error ? 'err' : (fix.pages || []).length || fix.text ? 'ok' : null;
+        if (id === 'advice') return advice.loading ? 'run' : advice.error ? 'err' : advice.text ? 'ok' : null;
+        if (id === 'chat') return chat.loading ? 'run' : null;
+        return null;
+      };
+      const runningLabel =
+        busy === 'audit'
+          ? '分析页面中…'
+          : busy === 'site'
+            ? '站点体检中…'
+            : busy === 'deep'
+              ? '深度检测中（本地 Chrome 实测）…'
+              : schema.loading
+                ? '检测结构化数据…'
+                : fix.loading
+                  ? '模型生成 AI 修复清单中…'
+                  : advice.loading
+                    ? '生成 AI 建议中…'
+                    : keywords.loading
+                      ? '抓取页面、提取关键词…'
+                      : search.loading
+                        ? '查询搜索数据…'
+                        : indexStatus.loading
+                          ? '读取索引状态…'
+                          : crux && crux.loading
+                            ? '获取 CrUX 字段数据…'
+                            : null;
 
       return h(
         'div',
@@ -2172,7 +3885,6 @@ window.__ModuleLoader__.load({
         }),
 
         error ? h('div', { className: 'seo-wb-error', role: 'alert' }, h('span', { className: 'seo-wb-error-mark' }, '!'), h('span', null, error)) : null,
-        !report ? h(ChatPanel, { chat, modelReady: !!modelSel, onSend: sendChat, onClear: () => setChat({ messages: [], loading: false, error: null }), compact: true }) : null,
 
         report
           ? h(
@@ -2216,8 +3928,9 @@ window.__ModuleLoader__.load({
               h(
                 'div',
                 { className: 'seo-wb-tabs', role: 'tablist' },
-                (isSiteReport ? ['overview', 'issues', 'chat', 'details', 'keywords', 'search', 'index', 'perf', 'advice'] : ['issues', 'chat', 'details', 'overview', 'search', 'index', 'perf', 'advice']).map((id) =>
-                  h(
+                (isSiteReport ? ['overview', 'diff', 'links', 'issues', 'chat', 'details', 'schema', 'keywords', 'search', 'index', 'semrush', 'perf', 'fix', 'advice'] : ['issues', 'chat', 'details', 'schema', 'overview', 'diff', 'links', 'search', 'index', 'semrush', 'perf', 'fix', 'advice']).map((id) => {
+                  const st = tabState(id);
+                  return h(
                     'button',
                     {
                       key: id,
@@ -2225,28 +3938,50 @@ window.__ModuleLoader__.load({
                       role: 'tab',
                       'aria-selected': tab === id,
                       className: `seo-wb-tab${tab === id ? ' seo-wb-tab-active' : ''}`,
-                      onClick: () => setTab(id),
+                      onClick: (e) => {
+                        setTab(id);
+                        if (e.currentTarget && e.currentTarget.scrollIntoView) e.currentTarget.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+                      },
+                      title: st === 'run' ? '任务进行中…' : st === 'err' ? '上次运行出错，见面板内提示' : undefined,
                     },
-                    tabLabel(id),
-                  ),
-                ),
+                    st ? h('span', { className: `seo-wb-tab-dot seo-wb-tab-dot-${st}`, 'aria-hidden': true }) : null,
+                    h('span', { className: 'seo-wb-tab-text' }, tabLabel(id)),
+                  );
+                }),
               ),
+              runningLabel
+                ? h(
+                    'div',
+                    { className: 'seo-wb-taskline', role: 'status', 'aria-live': 'polite' },
+                    h('span', { className: 'seo-wb-taskline-dot', 'aria-hidden': true }),
+                    h('span', null, runningLabel),
+                  )
+                : null,
               tab === 'issues'
                 ? h(IssuesSection, { issues: report.issues, openIssue, setOpenIssue })
                 : tab === 'details'
                   ? h(DetailsSection, { groups: report.groups, openGroup, setOpenGroup })
-                  : tab === 'overview'
-                    ? (isSiteReport ? h(SiteOverviewSection, { report }) : h(OverviewSection, { report }))
-                    : tab === 'keywords'
-                      ? h(KeywordsSection, { keywords, onRun: runKeywords, report })
+                  : tab === 'schema'
+                    ? h(SchemaPanel, { schema, onRun: runSchema, modelReady: !!modelSel, modelSel })
+                    : tab === 'overview'
+                      ? (isSiteReport ? h(SiteOverviewSection, { report }) : h(OverviewSection, { report }))
+                      : tab === 'diff'
+                        ? h(CompareSection, { report, deep, history })
+                        : tab === 'links'
+                          ? h(LinkFixPanel, { report })
+                          : tab === 'semrush'
+                            ? h(SemrushPanel, { report, modelReady: !!modelSel, modelSel })
+                            : tab === 'keywords'
+                      ? h(KeywordsSection, { keywords, onRun: runKeywords, report, modelReady: !!modelSel, modelSel })
                       : tab === 'search'
                         ? h(SearchPanel, {
                             provider: search.provider,
                             url: searchUrl,
-                            onProvider: (p) => setSearch((s) => ({ ...s, provider: p, result: null, error: null })),
+                            onProvider: (p) => setSearch((s) => ({ ...s, provider: p, result: null, prev: null, error: null })),
                             onUrl: setSearchUrl,
                             loading: search.loading,
                             result: search.result,
+                            prev: search.prev,
                             error: search.error,
                             code: search.code,
                             onCode: (v) => setSearch((s) => ({ ...s, code: v })),
@@ -2264,9 +3999,16 @@ window.__ModuleLoader__.load({
                             ? h(
                                 'div',
                                 { className: 'seo-wb-perf' },
-                                isSiteReport ? null : h(DeepSection, { deep }),
+                                isSiteReport
+                                  ? null
+                                  : busy === 'deep'
+                                    ? h(Spinner, { label: '深度检测中（本地 Chrome 实测）…' })
+                                    : h(DeepSection, { deep }),
+                                isSiteReport || busy === 'deep' || deep ? null : h('div', { className: 'seo-wb-empty' }, '还没有性能数据 · 点上方「深度检测（CWV）」'),
                                 h(CruxCard, { crux, onRun: runCruxField }),
                               )
+                            : tab === 'fix'
+                            ? h(FixPlanPanel, { fix, onRun: runFixPlan, modelReady: !!modelSel, report })
                             : h(
                               'div',
                               { className: 'seo-wb-advice' },
@@ -2281,7 +4023,7 @@ window.__ModuleLoader__.load({
                                 { className: 'seo-wb-advice-tools' },
                                 h('button', { type: 'button', className: 'seo-wb-btn', onClick: copyAdvice }, copied === 'advice' ? '已复制 ✓' : '复制'),
                               ),
-                              h('pre', { className: 'seo-wb-advice-pre' }, advice.text),
+                              h(Markdown, { text: advice.text, className: 'seo-wb-advice-pre' }),
                             )
                           : !advice.loading && !advice.error
                             ? h('div', { className: 'seo-wb-empty' }, '点「AI 建议」用选中的模型生成修复清单')
@@ -2452,11 +4194,19 @@ window.__ModuleLoader__.load({
 .seo-wb-fill-bad { background: var(--dsw-alias-state-error-primary); }
 .seo-wb-group-value { min-width: 30px; text-align: right; font-size: 13px; font-weight: 600; }
 .seo-wb-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--dsw-alias-border-l1); }
-.seo-wb-tabs { display: flex; gap: 4px; margin-top: 16px; border-bottom: 1px solid var(--dsw-alias-border-l1); }
-.seo-wb-tab { border: 0; background: none; font-family: inherit; font-size: 14px; color: var(--dsw-alias-label-secondary); padding: 9px 14px; border-radius: 8px 8px 0 0; cursor: pointer; border-bottom: 2px solid transparent; }
+.seo-wb-tabs { display: flex; flex-wrap: nowrap; gap: 2px; margin-top: 16px; border-bottom: 1px solid var(--dsw-alias-border-l1); overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: thin; scrollbar-color: var(--dsw-alias-border-l1) transparent; -webkit-overflow-scrolling: touch; }
+.seo-wb-tabs::-webkit-scrollbar { height: 5px; }
+.seo-wb-tabs::-webkit-scrollbar-thumb { background: var(--dsw-alias-border-l1); border-radius: 3px; }
+.seo-wb-tabs::-webkit-scrollbar-track { background: transparent; }
+.seo-wb-tab { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; border: 0; background: none; font-family: inherit; font-size: 13px; color: var(--dsw-alias-label-secondary); padding: 8px 11px; border-radius: 8px 8px 0 0; cursor: pointer; border-bottom: 2px solid transparent; }
 .seo-wb-tab:hover { background: var(--dsw-alias-bg-layer-2); }
 .seo-wb-tab-active { color: var(--dsw-alias-label-primary); font-weight: 600; border-bottom-color: var(--dsw-alias-brand-primary); }
-.seo-wb-tabs { flex-wrap: wrap; }
+.seo-wb-tab-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.seo-wb-tab-dot-run { border: 2px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 30%, transparent); border-top-color: var(--dsw-alias-brand-primary); animation: seo-wb-spin .9s linear infinite; }
+.seo-wb-tab-dot-err { background: var(--dsw-alias-state-error-primary); }
+.seo-wb-tab-dot-ok { background: var(--dsw-alias-state-success-primary); opacity: .7; }
+.seo-wb-taskline { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 12.5px; color: var(--dsw-alias-label-secondary); }
+.seo-wb-taskline-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; border: 2px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 30%, transparent); border-top-color: var(--dsw-alias-brand-primary); animation: seo-wb-spin .9s linear infinite; }
 .seo-wb-project { border: 1px solid var(--dsw-alias-border-l1); border-radius: 10px; overflow: hidden; }
 .seo-wb-project + .seo-wb-project { margin-top: 8px; }
 .seo-wb-project-head { width: 100%; display: flex; align-items: center; gap: 8px; padding: 9px 12px; border: 0; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); font-family: inherit; font-size: 13px; font-weight: 600; cursor: pointer; text-align: left; }
@@ -2649,6 +4399,173 @@ window.__ModuleLoader__.load({
 .seo-wb-chat-hint { font-size: 12px; padding: 5px 10px; border-radius: 999px; background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1); color: var(--dsw-alias-label-primary); cursor: pointer; }
 .seo-wb-chat-hint:hover { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
 .seo-wb-chat-error { margin-top: 0; }
+.seo-wb-chat-ai-col { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; max-width: 86%; min-width: 0; }
+.seo-wb-chat-ai-col .seo-wb-chat-bubble { max-width: 100%; }
+.seo-wb-chat-copy { font-size: 11px; line-height: 1; padding: 3px 8px; border-radius: 6px; }
+.seo-wb-md { white-space: normal; word-break: break-word; font-size: 13px; line-height: 1.7; color: var(--dsw-alias-label-primary); }
+.seo-wb-md > :first-child { margin-top: 0; }
+.seo-wb-md > :last-child { margin-bottom: 0; }
+.seo-wb-md p { margin: 0 0 8px; }
+.seo-wb-md h1, .seo-wb-md h2, .seo-wb-md h3, .seo-wb-md h4, .seo-wb-md h5, .seo-wb-md h6 { margin: 12px 0 6px; font-weight: 600; line-height: 1.35; }
+.seo-wb-md h1 { font-size: 18px; }
+.seo-wb-md h2 { font-size: 16px; }
+.seo-wb-md h3 { font-size: 14.5px; }
+.seo-wb-md h4 { font-size: 13.5px; }
+.seo-wb-md h5, .seo-wb-md h6 { font-size: 13px; }
+.seo-wb-md strong { font-weight: 600; }
+.seo-wb-md ul, .seo-wb-md ol { margin: 4px 0 8px; padding-left: 20px; }
+.seo-wb-md li { margin: 2px 0; }
+.seo-wb-md-task { color: var(--dsw-alias-label-secondary); }
+.seo-wb-md-task-on { color: var(--dsw-alias-state-success-primary); }
+.seo-wb-md-inline-code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; padding: 1px 5px; border-radius: 4px; background: color-mix(in srgb, var(--dsw-alias-label-secondary) 14%, transparent); }
+.seo-wb-md-pre { display: block; margin: 6px 0; padding: 10px 12px; border-radius: 8px; background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l1); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.6; white-space: pre; overflow-x: auto; }
+.seo-wb-md blockquote { margin: 6px 0; padding: 2px 10px; border-left: 3px solid var(--dsw-alias-border-l2); color: var(--dsw-alias-label-secondary); }
+.seo-wb-md hr { border: 0; border-top: 1px solid var(--dsw-alias-border-l1); margin: 10px 0; }
+.seo-wb-md-table { border-collapse: collapse; margin: 8px 0; font-size: 12.5px; }
+.seo-wb-md-table th, .seo-wb-md-table td { border: 1px solid var(--dsw-alias-border-l1); padding: 4px 10px; text-align: left; vertical-align: top; }
+.seo-wb-md-table th { background: color-mix(in srgb, var(--dsw-alias-label-secondary) 10%, transparent); font-weight: 600; }
+.seo-wb-md a { color: var(--dsw-alias-brand-primary); text-decoration: underline; }
+.seo-wb-chat-md, .seo-wb-advice-pre.seo-wb-md { white-space: normal; }
+.seo-wb-diff { display: flex; flex-direction: column; gap: 14px; }
+.seo-wb-diff-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.seo-wb-diff-title { font-size: 14px; font-weight: 600; }
+.seo-wb-diff-pick { font-size: 12.5px; color: var(--dsw-alias-label-secondary); display: inline-flex; align-items: center; gap: 4px; }
+.seo-wb-diff-pick select { font: inherit; font-size: 12.5px; padding: 3px 8px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); color: inherit; max-width: 220px; }
+.seo-wb-diff-score { display: flex; flex-direction: column; gap: 4px; }
+.seo-wb-diff-score-row { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 3px 8px; border-radius: 6px; }
+.seo-wb-diff-score-total { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 8%, transparent); font-weight: 600; }
+.seo-wb-diff-label { flex: 0 0 130px; }
+.seo-wb-diff-before { width: 34px; color: var(--dsw-alias-label-secondary); }
+.seo-wb-diff-arrow { width: 14px; color: var(--dsw-alias-label-secondary); }
+.seo-wb-diff-after { width: 34px; font-weight: 600; }
+.seo-wb-delta { font-size: 11.5px; padding: 1px 6px; border-radius: 999px; }
+.seo-wb-delta-good { color: var(--dsw-alias-color-success, #2e9e5b); background: color-mix(in srgb, var(--dsw-alias-color-success, #2e9e5b) 12%, transparent); }
+.seo-wb-delta-bad { color: var(--dsw-alias-color-danger, #d64545); background: color-mix(in srgb, var(--dsw-alias-color-danger, #d64545) 12%, transparent); }
+.seo-wb-delta-flat { color: var(--dsw-alias-label-secondary); background: color-mix(in srgb, var(--dsw-alias-label-secondary) 12%, transparent); }
+.seo-wb-diff-issues { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.seo-wb-diff-col { min-width: 0; }
+.seo-wb-diff-col h4, .seo-wb-diff-cwv h4, .seo-wb-diff-site h4 { margin: 6px 0 8px; font-size: 13px; }
+.seo-wb-diff-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.seo-wb-diff-list li { display: flex; align-items: flex-start; gap: 6px; font-size: 12.5px; line-height: 1.45; }
+.seo-wb-diff-issue-title { min-width: 0; }
+.seo-wb-diff-empty { font-size: 12.5px; color: var(--dsw-alias-label-secondary); }
+.seo-wb-delta-good { color: #2e9e5b; background: color-mix(in srgb, #2e9e5b 12%, transparent); }
+.seo-wb-delta-bad { color: #d64545; background: color-mix(in srgb, #d64545 12%, transparent); }
+.seo-wb-diff-cwv, .seo-wb-diff-site { margin-top: 4px; }
+.seo-wb-diff-cwv td, .seo-wb-diff-site td { font-size: 12.5px; }
+.seo-wb-schema { display: flex; flex-direction: column; gap: 10px; }
+.seo-wb-schema-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.seo-wb-schema-summary { display: inline-flex; align-items: center; gap: 8px; font-size: 13.5px; }
+.seo-wb-schema-types { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.seo-wb-chip-schema { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent); color: var(--dsw-alias-brand-primary); }
+.seo-wb-schema-block { border: 1px solid var(--dsw-alias-border-l1); border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; background: var(--dsw-alias-bg-layer-1); }
+.seo-wb-schema-block-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.seo-wb-schema-block-title { font-weight: 600; font-size: 13px; }
+.seo-wb-schema-syntax { font-size: 12.5px; color: var(--dsw-alias-color-danger, #d64545); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
+.seo-wb-schema-node { display: flex; flex-direction: column; gap: 4px; padding: 6px 0; border-top: 1px dashed var(--dsw-alias-border-l1); }
+.seo-wb-schema-node-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+.seo-wb-schema-node-head strong { color: var(--dsw-alias-brand-primary); }
+.seo-wb-schema-props { font-size: 12px; color: var(--dsw-alias-label-secondary); word-break: break-all; }
+.seo-wb-schema-miss { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.seo-wb-schema-rich { font-size: 12.5px; color: var(--dsw-alias-brand-primary); background: color-mix(in srgb, var(--dsw-alias-brand-primary) 8%, transparent); border-radius: 6px; padding: 5px 8px; }
+.seo-wb-schema-warn { font-size: 12.5px; color: var(--dsw-alias-warning, #c98a1b); }
+.seo-wb-badge { display: inline-block; font-size: 11px; line-height: 1; padding: 3px 7px; border-radius: 999px; }
+.seo-wb-badge-ok { color: #2e9e5b; background: color-mix(in srgb, #2e9e5b 14%, transparent); }
+.seo-wb-badge-warn { color: #c98a1b; background: color-mix(in srgb, #c98a1b 14%, transparent); }
+.seo-wb-badge-bad { color: #d64545; background: color-mix(in srgb, #d64545 14%, transparent); }
+.seo-wb-notes { font-size: 12px; color: var(--dsw-alias-label-secondary); display: flex; flex-direction: column; gap: 2px; }
+.seo-wb-fix { display: flex; flex-direction: column; gap: 12px; }
+.seo-wb-fix-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.seo-wb-fix-hint { font-size: 12.5px; color: var(--dsw-alias-label-secondary); }
+.seo-wb-table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+.seo-wb-table th, .seo-wb-table td { border: 1px solid var(--dsw-alias-border-l1); padding: 5px 9px; text-align: left; vertical-align: top; }
+.seo-wb-table th { background: color-mix(in srgb, var(--dsw-alias-label-secondary) 10%, transparent); font-weight: 600; }
+.seo-wb-fix-table { font-size: 12.5px; }
+.seo-wb-fix-table th, .seo-wb-fix-table td { vertical-align: top; padding: 6px 8px; }
+.seo-wb-fix-url { max-width: 240px; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+.seo-wb-fix-cell { min-width: 190px; max-width: 260px; }
+.seo-wb-fix-val { font-size: 12.5px; line-height: 1.5; word-break: break-word; }
+.seo-wb-fix-meta { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+.seo-wb-fix-copy { font-size: 11px; padding: 2px 8px; }
+.seo-wb-len { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 999px; color: var(--dsw-alias-label-secondary); background: color-mix(in srgb, var(--dsw-alias-label-secondary) 12%, transparent); }
+.seo-wb-len-ok { color: #2e9e5b; background: color-mix(in srgb, #2e9e5b 12%, transparent); }
+.seo-wb-len-over { color: #c98a1b; background: color-mix(in srgb, #c98a1b 12%, transparent); }
+.seo-wb-fix-issues { display: inline-flex; gap: 4px; flex-wrap: wrap; max-width: 220px; }
+.seo-wb-fix-note { max-width: 140px; font-size: 12px; color: var(--dsw-alias-label-secondary); }
+.seo-wb-fix-raw { display: flex; flex-direction: column; gap: 6px; }
+.seo-wb-fix-raw-note { font-size: 12.5px; color: var(--dsw-alias-label-secondary); }
+.seo-wb-links { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+.seo-wb-links-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.seo-wb-links-summary { font-size: 13.5px; font-weight: 600; color: var(--dsw-alias-label-primary); }
+.seo-wb-links-actions { display: inline-flex; gap: 6px; }
+.seo-wb-links-block { display: flex; flex-direction: column; gap: 6px; }
+.seo-wb-links-block-title { font-size: 13.5px; font-weight: 600; color: var(--dsw-alias-label-primary); }
+.seo-wb-links-table .seo-wb-se-row { grid-template-columns: minmax(180px, 1fr) minmax(120px, auto) minmax(140px, auto); }
+.seo-wb-links-detail { font-size: 12px; color: var(--dsw-alias-label-secondary); }
+.seo-wb-links-suggest { display: inline-flex; align-items: center; gap: 6px; }
+.seo-wb-links-target { font-size: 12px; color: #2e9e5b; word-break: break-all; }
+.seo-wb-links-copy { font-size: 11px; padding: 2px 8px; }
+.seo-wb-links-note { font-size: 12px; color: var(--dsw-alias-label-secondary); }
+.seo-wb-links-note-inline { font-size: 12px; color: var(--dsw-alias-label-secondary); }
+.seo-wb-links-note-full { font-size: 12px; color: var(--dsw-alias-label-secondary); line-height: 1.6; }
+.seo-wb-rank-summary { display: inline-flex; gap: 8px; margin-left: 10px; font-size: 12px; font-weight: 500; }
+.seo-wb-rank-table .seo-wb-se-row { grid-template-columns: minmax(160px, 1fr) 80px 80px 90px 90px; }
+.seo-wb-schema-fix { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--dsw-alias-border-l1); }
+.seo-wb-schema-fix-head { display: flex; align-items: center; gap: 8px; }
+.seo-wb-schema-fix-hint { font-size: 12px; color: var(--dsw-alias-label-secondary); }
+.seo-wb-schema-fix-out { display: flex; flex-direction: column; gap: 6px; }
+.seo-wb-schema-fix-out-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12.5px; font-weight: 600; color: var(--dsw-alias-label-primary); }
+.seo-wb-schema-fix-out .seo-wb-md-pre { max-height: 260px; overflow: auto; font-size: 12px; line-height: 1.5; }
+.seo-wb-kw-expand { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; padding-top: 10px; border-top: 1px dashed var(--dsw-alias-border-l1); }
+.seo-wb-kw-expand-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.seo-wb-kw-expand-hint { font-size: 12px; color: var(--dsw-alias-label-secondary); }
+.seo-wb-kw-expand-row { display: flex; gap: 8px; align-items: center; }
+.seo-wb-kw-expand-row .seo-wb-input { flex: 1; min-width: 0; }
+.seo-wb-kw-expand-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.seo-wb-kw-expand-table { display: flex; flex-direction: column; border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; overflow: hidden; }
+.seo-wb-kw-expand-item { display: grid; grid-template-columns: minmax(140px, 1.3fr) 84px minmax(110px, 1fr) minmax(160px, 1.6fr); gap: 8px; padding: 7px 10px; font-size: 12.5px; border-bottom: 1px solid var(--dsw-alias-border-l1); align-items: center; }
+.seo-wb-kw-expand-item:last-child { border-bottom: none; }
+.seo-wb-kw-expand-itemhead { color: var(--dsw-alias-label-secondary); font-size: 11.5px; background: var(--dsw-alias-bg-layer-1); }
+.seo-wb-kw-intent { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l1); justify-self: start; white-space: nowrap; }
+.seo-wb-kw-intent-informational { color: var(--dsw-alias-brand-primary); border-color: var(--dsw-alias-brand-primary); }
+.seo-wb-kw-intent-commercial { color: #8b5cf6; border-color: #8b5cf6; }
+.seo-wb-kw-intent-transactional { color: var(--dsw-alias-state-success-primary); border-color: var(--dsw-alias-state-success-primary); }
+.seo-wb-kw-intent-navigational { color: var(--dsw-alias-label-secondary); }
+.seo-wb-kw-expand-target { font-size: 12px; word-break: break-all; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.seo-wb-kw-expand-new { font-size: 12px; color: var(--dsw-alias-brand-primary); font-weight: 600; }
+.seo-wb-kw-expand-note { font-size: 12px; color: var(--dsw-alias-label-secondary); }
+      .seo-wb-semrush { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+      .seo-wb-semrush-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+      .seo-wb-semrush-title { font-size: 14px; font-weight: 600; color: var(--dsw-alias-label-primary); }
+      .seo-wb-semrush-note { font-size: 12px; color: var(--dsw-alias-label-secondary); }
+      .seo-wb-semrush-kinds { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+      .seo-wb-semrush-kind-active { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
+      .seo-wb-semrush-target { font-size: 12px; color: var(--dsw-alias-label-secondary); }
+      .seo-wb-semrush-linkrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+      .seo-wb-semrush-link { flex: 1; min-width: 220px; font-size: 12.5px; }
+      .seo-wb-semrush-keyword, .seo-wb-semrush-competitor { flex: 0 1 210px; min-width: 150px; font-size: 12.5px; }
+      .seo-wb-semrush-cmpgrid { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-radius: 8px; background: color-mix(in srgb, var(--dsw-alias-brand-primary) 6%, var(--dsw-alias-bg-layer-1)); }
+      .seo-wb-semrush-hint { font-size: 12.5px; line-height: 1.6; color: var(--dsw-alias-label-secondary); background: color-mix(in srgb, var(--dsw-alias-brand-primary) 7%, transparent); border: 1px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 25%, transparent); border-radius: 8px; padding: 8px 10px; }
+      .seo-wb-semrush-body { display: flex; flex-direction: column; gap: 12px; }
+      .seo-wb-semrush-page { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+      .seo-wb-semrush-copy { font-size: 11px; }
+      .seo-wb-semrush-shot { max-width: 100%; border-radius: 8px; border: 1px solid var(--dsw-alias-border-l1); }
+      .seo-wb-semrush-tables { display: flex; flex-direction: column; gap: 10px; }
+      .seo-wb-semrush-table-block { display: flex; flex-direction: column; gap: 6px; }
+      .seo-wb-semrush-block-title { font-size: 13px; font-weight: 600; color: var(--dsw-alias-label-primary); }
+      .seo-wb-semrush-textbox { font-size: 12px; color: var(--dsw-alias-label-secondary); }
+      .seo-wb-semrush-ai { display: flex; flex-direction: column; gap: 8px; border-top: 1px dashed var(--dsw-alias-border-l1); padding-top: 10px; }
+      .seo-wb-semrush-ai-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+      .seo-wb-semrush-ai-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+      .seo-wb-semrush-hint-inline { font-size: 12px; color: var(--dsw-alias-label-secondary); }
+      .seo-wb-semrush-ovgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 8px; }
+      .seo-wb-semrush-card { border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; padding: 8px 10px; background: var(--dsw-alias-bg-layer-1); display: flex; flex-direction: column; gap: 4px; }
+      .seo-wb-semrush-card-label { font-size: 12px; color: var(--dsw-alias-label-secondary); }
+      .seo-wb-semrush-card-value { font-size: 16px; font-weight: 600; color: var(--dsw-alias-label-primary); }
+      .seo-wb-semrush-kw-table .seo-wb-se-row { grid-template-columns: minmax(140px, 1fr) 70px 90px 90px 70px; }
+      .seo-wb-semrush-comp-table .seo-wb-se-row { grid-template-columns: minmax(140px, 1fr) 90px 80px 100px 100px; }
+      .seo-wb-semrush-notes { margin: 0; padding-left: 18px; font-size: 12.5px; line-height: 1.65; color: var(--dsw-alias-label-secondary); }
+
 `;
 
     // ------------------------------------------------------------ register

@@ -1,0 +1,7 @@
+# 本地运行时缓存 / 测试产物，不进仓库
+.cache/
+.scratch/
+.helper/
+node_modules/
+*.log
+.DS_Store

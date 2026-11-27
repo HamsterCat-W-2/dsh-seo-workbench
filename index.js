@@ -24,6 +24,9 @@ import { buildSiteReport } from './lib/site.js';
 import { runCrux } from './lib/crux.js';
 import { runBingSearch } from './lib/bing.js';
 import { buildAuthUrl, exchangeCode, listSites, searchAnalytics, listSitemaps, inspectUrls } from './lib/gsc.js';
+import { fetchPage } from './lib/fetch.js';
+import { validateSchema } from './lib/schema.js';
+import { pullSemrush, pullUserChrome, activeTabUrl, buildSemrushParsePrompt, normalizeSemrushParse, mirrorUrl } from './lib/semrush.js';
 
 export const inject = ['webServer', 'llm', 'tools'];
 
@@ -222,6 +225,198 @@ function buildAdvicePrompt(url, report, extras = {}) {
     '4. 最后用 2–3 句话总结最值得优先处理的事项；',
     '5. 只输出正文，不要客套话，不要重复我给的列表。',
   ].join('\n');
+}
+
+/**
+ * Build the prompt for the batch fix-plan route: generate concrete title /
+ * meta description rewrites for pages with title/description problems.
+ */
+function buildFixPlanPrompt(url, report, extras = {}) {
+  const isSite = report && report.mode === 'site';
+  const flagNames = (p) =>
+    [
+      p.failed && '抓取失败',
+      p.noindex && 'noindex',
+      p.thin && '薄内容',
+      p.dupTitle && '标题重复',
+      p.dupDesc && '描述重复',
+      p.orphan && '孤儿页',
+      p.missingH1 && '缺H1',
+      p.missingCanonical && '缺canonical',
+      p.missingTitle && '缺标题',
+      p.missingDesc && '缺描述',
+    ]
+      .filter(Boolean)
+      .join('、');
+  let pageLines = '';
+  if (isSite) {
+    const flagged = (report.pages || []).filter((p) => p.failed || p.noindex || p.thin || p.dupTitle || p.dupDesc || p.orphan || p.missingH1 || p.missingTitle || p.missingDesc || p.missingCanonical).slice(0, 10);
+    pageLines = flagged.length
+      ? flagged.map((p) => `- url: ${p.url}\n  title: ${p.title || '（无）'}\n  words: ${p.words ?? '?'}\n  flags: ${flagNames(p) || '无'}`).join('\n')
+      : '（没有标题/描述相关问题页面）';
+  } else {
+    const p = report && report.page ? report.page : {};
+    pageLines = `- url: ${url}\n  title: ${p.title || '（无）'}\n  description: ${p.description || '（无）'}\n  words: ${p.words ? p.words.total : '?'}\n  flags: ${(report.issues || []).map((i) => i.title).join('、') || '无'}`;
+  }
+  const maxCount = isSite ? 8 : 1;
+  return [
+    '你是一位资深技术 SEO 编辑。基于下面的页面数据，为存在标题/描述问题的页面批量生成修复方案。',
+    '',
+    `网站：${url}`,
+    `页面数据：\n${pageLines || '（无）'}`,
+    '',
+    `要求：只输出一个 JSON 数组，包含最多 ${maxCount} 个元素，每个元素格式：`,
+    '{"url":"页面完整地址","title":"建议的新标题","description":"建议的新 meta description","issues":["涉及的现有问题标签"],"note":"一句生成依据"}',
+    '',
+    '硬性规则：',
+    '1. 只输出 JSON 数组本身，不要 Markdown 代码围栏、不要注释、不要前后缀文字；',
+    '2. 中文标题不超过 60 字符，中文描述不超过 150 字符；',
+    '3. 标题自然包含主关键词，避免关键词堆砌；描述一句话概括页面价值并引导点击；',
+    '4. 保留品牌名（如果有）；不要凭空发明页面不存在的业务内容；',
+    '5. 只处理列表里"缺标题/缺描述/标题重复/描述重复/薄内容"的页面；没有问题的页面不要包含；',
+    '6. 如果某页确实无法安全改写，就把该页的 title/description 设为 "" 并在 note 里说明。',
+  ].join('\n');
+}
+
+/** Pull the first balanced JSON array out of a model answer (best effort). */
+function extractJsonArray(text) {
+  const start = text.indexOf('[');
+  if (start === -1) return null;
+  for (let end = text.lastIndexOf(']'); end > start; end = text.lastIndexOf(']', end - 1)) {
+    try {
+      const value = JSON.parse(text.slice(start, end + 1));
+      if (Array.isArray(value)) return value;
+    } catch {
+      // keep scanning for an earlier "]" that balances
+    }
+  }
+  return null;
+}
+
+/** Pull the first balanced JSON object out of a model answer (best effort). */
+function extractJsonObject(text) {
+  let idx = -1;
+  while ((idx = text.indexOf('{', idx + 1)) !== -1) {
+    let depth = 0;
+    let inString = false;
+    let esc = false;
+    for (let i = idx; i < text.length; i += 1) {
+      const c = text[i];
+      if (inString) {
+        if (esc) esc = false;
+        else if (c === '\\') esc = true;
+        else if (c === '"') inString = false;
+        continue;
+      }
+      if (c === '"') inString = true;
+      else if (c === '{') depth += 1;
+      else if (c === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          try {
+            const value = JSON.parse(text.slice(idx, i + 1));
+            if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+          } catch {
+            // keep scanning for another balanced object
+          }
+          break;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/** Strict prompt asking the model to complete/repair one JSON-LD block. */
+function buildSchemaFixPrompt(url, raw, types, missing) {
+  const missLines =
+    Array.isArray(missing) && missing.length
+      ? missing.map((m) => `- ${m}`).join('\n')
+      : '（校验未发现缺失的必需属性，请保持原结构，只做合理补全）';
+  return [
+    '你是一个资深的技术 SEO / Schema.org 专家。下面是一个网页里提取的 JSON-LD 结构化数据块，以及校验发现的缺失属性。',
+    `页面 URL：${url}`,
+    `检测到的类型：${(Array.isArray(types) && types.length ? types : ['未知']).join(', ')}`,
+    '缺失的必需属性（尽量合理推断补全；不确定的内容用合适占位符，不要编造业务数据）：',
+    missLines,
+    '',
+    '原始 JSON-LD：',
+    (raw || '').trim() || '（无）',
+    '',
+    '要求：只输出修正后的完整 JSON-LD 对象本身（一个 JSON 对象）。',
+    '硬性规则：',
+    '1. 只输出 JSON 对象，不要 Markdown 代码围栏、不要注释、不要前后缀文字；',
+    '2. 必须是合法 JSON，能被 JSON.parse 直接解析；',
+    '3. 保留原有类型与已有属性不变，只补齐缺失属性并做合理修正。',
+  ].join('\n');
+}
+
+/** Strict prompt asking the model to expand keyword candidates for the site. */
+function buildKeywordExpandPrompt(url, seeds, topKeywords, clusters, gaps) {
+  const seedLines = (seeds || []).length ? seeds.join('、') : '（用户未给种子词，请从站点主题自行推导 3-5 个种子方向）';
+  const topLines = (topKeywords || []).length
+    ? topKeywords
+        .slice(0, 12)
+        .map((k) => `「${k.keyword}」频次 ${k.count} · 覆盖 ${k.pages} 页`)
+        .join('；')
+    : '（无）';
+  const clusterLines = (clusters || []).length
+    ? clusters
+        .slice(0, 5)
+        .map((c) => `「${c.keyword}」重复在 ${(c.pages || []).map((pg) => pg.url).join('、')}`)
+        .join('；')
+    : '（无）';
+  const gapLines = (gaps || []).length
+    ? gaps
+        .slice(0, 8)
+        .map((q) => `「${q.query}」展示 ${q.impressions} 点击 ${q.clicks} 排名 ${q.position}`)
+        .join('；')
+    : '（无）';
+  return [
+    '你是一个资深 SEO 关键词研究员。根据下面的站点资料，生成一份关键词候选清单（用于内容规划）。',
+    '',
+    `网站：${url}`,
+    `种子词：${seedLines}`,
+    `站内已有 Top 关键词：${topLines}`,
+    `关键词自相残杀：${clusterLines}`,
+    `内容缺口（有搜索展示但站内内容未覆盖的查询）：${gapLines}`,
+    '',
+    '要求：只输出一个 JSON 数组，最多 24 个元素，每个元素格式：',
+    '{"keyword":"候选关键词","intent":"informational|commercial|transactional|navigational","target":"建议落点：已有页面路径（/xxx）或「新页面」","note":"一句话依据（搜索意图 / 竞争判断 / 建议写法）"}',
+    '',
+    '硬性规则：',
+    '1. 只输出 JSON 数组本身，不要 Markdown 代码围栏、不要注释、不要前后缀文字；',
+    '2. 关键词使用与站点一致的语言（中文站用中文）；长尾词为主，避免与已有页自相残杀；',
+    '3. 不要编造搜索量、CPC、竞争度等外部数据；note 里也不许出现具体数字指标；',
+    '4. 优先覆盖「内容缺口」里的查询，其次围绕种子词与 Top 关键词扩展；',
+    '5. target 只能填站点已有路径（从站内链接推断）或「新页面」。',
+  ].join('\n');
+}
+
+/** Sanitize one keyword candidate to plain strings. */
+function normalizeKeywordItem(item) {
+  const str = (v) => (v == null ? '' : String(v)).trim();
+  const intent = str(item && item.intent).toLowerCase();
+  const allowed = ['informational', 'commercial', 'transactional', 'navigational'];
+  return {
+    keyword: str(item && item.keyword),
+    intent: allowed.includes(intent) ? intent : 'informational',
+    target: str(item && item.target),
+    note: str(item && item.note),
+  };
+}
+
+/** Sanitize one fix-plan item to plain strings. */
+function normalizeFixItem(item) {
+  const str = (v) => (v == null ? '' : String(v)).trim();
+  const issues = Array.isArray(item && item.issues) ? item.issues.map(str).filter(Boolean) : [];
+  return {
+    url: str(item && item.url),
+    title: str(item && item.title),
+    description: str(item && item.description),
+    issues,
+    note: str(item && item.note),
+  };
 }
 
 /* ------------------------------------------------------------------------ *
@@ -1239,6 +1434,468 @@ export function apply(ctx, config = {}) {
         },
       }),
     'seo-workbench: advice route',
+  );
+
+  // POST /api/schema — validate the page's JSON-LD (server HTML; use 深度检测
+  // when client-side JS injection is suspected).
+  ctx.effect(
+    () =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path: `${API}schema`,
+        handler: (req, res) => {
+          if (req.method !== 'POST') {
+            sendJson(res, 405, { error: 'method-not-allowed' });
+            return;
+          }
+          readBody(req)
+            .then(async (raw) => {
+              let body;
+              try {
+                body = JSON.parse(raw || '{}');
+              } catch {
+                sendJson(res, 400, { status: 'error', error: { code: 'bad-json', message: 'invalid JSON' } });
+                return;
+              }
+              const url = body && typeof body.url === 'string' ? body.url.trim() : '';
+              if (!url) {
+                sendJson(res, 400, { status: 'error', error: { code: 'missing-input', message: 'url is required' } });
+                return;
+              }
+              try {
+                const page = await fetchPage(url, {
+                  timeoutMs: Number(body.fetchTimeoutMs) || 15000,
+                  maxRedirects: Number(body.maxRedirects) || 5,
+                });
+                sendJson(
+                  res,
+                  200,
+                  validateSchema(page.html, { url, finalUrl: page.finalUrl, fetchedAt: new Date().toISOString() }),
+                );
+              } catch (err) {
+                sendJson(res, 200, {
+                  status: 'error',
+                  error: { code: (err && err.code) || 'schema-failed', message: (err && err.message) || String(err) },
+                });
+              }
+            })
+            .catch(() => sendJson(res, 500, { status: 'error', error: { code: 'internal', message: 'internal' } }));
+        },
+      }),
+    'seo-workbench: schema route',
+  );
+
+  // POST /api/fixplan — batch-generate concrete title / meta description fixes
+  // for pages with title/description problems. Strict-JSON prompt; the answer
+  // is parsed into a { pages: [...] } plan (raw text kept as fallback).
+  ctx.effect(
+    () =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path: `${API}fixplan`,
+        handler: (req, res) => {
+          if (req.method !== 'POST') {
+            sendJson(res, 405, { error: 'method-not-allowed' });
+            return;
+          }
+          readBody(req)
+            .then(async (raw) => {
+              let body;
+              try {
+                body = JSON.parse(raw || '{}');
+              } catch {
+                sendJson(res, 400, { status: 'error', error: { code: 'bad-json', message: 'invalid JSON' } });
+                return;
+              }
+              const url = body && typeof body.url === 'string' ? body.url.trim() : '';
+              const report = body && body.report && typeof body.report === 'object' ? body.report : null;
+              const provider = body && body.model && typeof body.model.provider === 'string' ? body.model.provider : '';
+              const model = body && body.model && typeof body.model.model === 'string' ? body.model.model : '';
+              if (!url || !report) {
+                sendJson(res, 400, { status: 'error', error: { code: 'missing-input', message: 'url and report are required' } });
+                return;
+              }
+              if (!llm || !provider || !model) {
+                sendJson(res, 400, { status: 'error', error: { code: 'no-model', message: 'DHS 模型服务不可用，或未选择模型' } });
+                return;
+              }
+              const prompt = buildFixPlanPrompt(url, report);
+              const signal = AbortSignal.timeout(90000);
+              let text = '';
+              let fallback = '';
+              try {
+                for await (const chunk of llm.stream({
+                  provider,
+                  model,
+                  sessionId: 'seo-workbench-fixplan',
+                  messages: [{ role: 'user', content: [{ type: 'text', text: prompt }], source: { kind: 'user' } }],
+                  system: '你是资深技术 SEO 编辑，严格按指令输出 JSON。',
+                  temperature: 0.5,
+                  signal,
+                })) {
+                  text += chunkText(chunk);
+                  const full = messageText(chunk);
+                  if (full) fallback = full;
+                }
+              } catch (err) {
+                sendJson(res, 502, {
+                  status: 'error',
+                  error: { code: 'llm-failed', message: String((err && err.message) || err || 'llm call failed') },
+                });
+                return;
+              }
+              const output = (text || fallback || '').trim();
+              if (!output) {
+                sendJson(res, 502, { status: 'error', error: { code: 'empty-output', message: '模型没有返回内容，请换个模型再试' } });
+                return;
+              }
+              const rawList = extractJsonArray(output);
+              const pages = Array.isArray(rawList) ? rawList.map(normalizeFixItem).filter((p) => p.url) : [];
+              if (!pages.length) {
+                sendJson(res, 200, { status: 'ok', pages: [], text: output, model: { provider, model }, parseFailed: true });
+                return;
+              }
+              sendJson(res, 200, { status: 'ok', pages, text: output, model: { provider, model }, parseFailed: false });
+            })
+            .catch(() => sendJson(res, 400, { status: 'error', error: { code: 'bad-body', message: 'invalid body' } }));
+        },
+      }),
+    'seo-workbench: fixplan route',
+  );
+
+  // POST /api/schema-fix — ask the model to complete / repair one JSON-LD
+  // block (missing required properties, syntax issues). Returns the corrected
+  // JSON-LD object as a pretty-printed string.
+  ctx.effect(
+    () =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path: `${API}schema-fix`,
+        handler: (req, res) => {
+          if (req.method !== 'POST') {
+            sendJson(res, 405, { error: 'method-not-allowed' });
+            return;
+          }
+          readBody(req)
+            .then(async (raw) => {
+              let body;
+              try {
+                body = JSON.parse(raw || '{}');
+              } catch {
+                sendJson(res, 400, { status: 'error', error: { code: 'bad-json', message: 'invalid JSON' } });
+                return;
+              }
+              const url = body && typeof body.url === 'string' ? body.url.trim() : '';
+              const blockRaw = body && typeof body.raw === 'string' ? body.raw.trim() : '';
+              const types = Array.isArray(body && body.types) ? body.types.filter((t) => typeof t === 'string').slice(0, 20) : [];
+              const missing = Array.isArray(body && body.missing) ? body.missing.filter((m) => typeof m === 'string').slice(0, 40) : [];
+              const provider = body && body.model && typeof body.model.provider === 'string' ? body.model.provider : '';
+              const model = body && body.model && typeof body.model.model === 'string' ? body.model.model : '';
+              if (!url || !blockRaw) {
+                sendJson(res, 400, { status: 'error', error: { code: 'missing-input', message: 'url and raw are required' } });
+                return;
+              }
+              if (!llm || !provider || !model) {
+                sendJson(res, 400, { status: 'error', error: { code: 'no-model', message: 'DHS 模型服务不可用，或未选择模型' } });
+                return;
+              }
+              const prompt = buildSchemaFixPrompt(url, blockRaw, types, missing);
+              const signal = AbortSignal.timeout(90000);
+              let text = '';
+              let fallback = '';
+              try {
+                for await (const chunk of llm.stream({
+                  provider,
+                  model,
+                  sessionId: 'seo-workbench-schema-fix',
+                  messages: [{ role: 'user', content: [{ type: 'text', text: prompt }], source: { kind: 'user' } }],
+                  system: '你是资深技术 SEO 与 Schema.org 专家，严格按指令输出 JSON。',
+                  temperature: 0.3,
+                  signal,
+                })) {
+                  text += chunkText(chunk);
+                  const full = messageText(chunk);
+                  if (full) fallback = full;
+                }
+              } catch (err) {
+                sendJson(res, 502, {
+                  status: 'error',
+                  error: { code: 'llm-failed', message: String((err && err.message) || err || 'llm call failed') },
+                });
+                return;
+              }
+              const output = (text || fallback || '').trim();
+              if (!output) {
+                sendJson(res, 502, { status: 'error', error: { code: 'empty-output', message: '模型没有返回内容，请换个模型再试' } });
+                return;
+              }
+              const parsed = extractJsonObject(output);
+              sendJson(res, 200, {
+                status: 'ok',
+                code: parsed ? JSON.stringify(parsed, null, 2) : output,
+                model: { provider, model },
+                parseFailed: !parsed,
+              });
+            })
+            .catch(() => sendJson(res, 400, { status: 'error', error: { code: 'bad-body', message: 'invalid body' } }));
+        },
+      }),
+    'seo-workbench: schema-fix route',
+  );
+
+  // POST /api/semrush-pull { url, kind?, waitMs? } — read a Semrush page from
+  // the local debug Chrome (visible window, persistent profile). Never throws:
+  // returns status ok | login-required | error so the client can guide the user.
+  ctx.effect(
+    () =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path: `${API}semrush-pull`,
+        handler: (req, res) => {
+          if (req.method !== 'POST') {
+            sendJson(res, 405, { error: 'method-not-allowed' });
+            return;
+          }
+          readBody(req)
+            .then(async (raw) => {
+              let body;
+              try {
+                body = JSON.parse(raw || '{}');
+              } catch {
+                sendJson(res, 400, { status: 'error', error: { code: 'bad-json', message: 'invalid JSON' } });
+                return;
+              }
+              const url = body && typeof body.url === 'string' ? body.url.trim() : '';
+              if (!url) {
+                sendJson(res, 400, { status: 'error', error: { code: 'missing-input', message: 'url is required' } });
+                return;
+              }
+              const kind = ['keywords', 'keyword', 'compare', 'gap'].includes(body.kind) ? body.kind : 'overview';
+              const waitMs = Number.isFinite(body.waitMs) ? body.waitMs : undefined;
+              const channel = body.channel === 'user-chrome' ? 'user-chrome' : 'debug-window';
+              // keyword/compare/gap pages only exist on the mirror tool the user
+              // is logged into, so their URLs are derived from the saved link.
+              const mirrorKind = kind === 'keyword' || kind === 'compare' || kind === 'gap' ? kind : '';
+              const pageUrl = channel === 'user-chrome' && mirrorKind
+                ? mirrorUrl(mirrorKind, body.own || url, {
+                    base: body.base || url,
+                    keyword: body.keyword,
+                    competitor: body.competitor,
+                    db: body.db,
+                  })
+                : url;
+              if (!pageUrl) {
+                sendJson(res, 400, {
+                  status: 'error',
+                  error: {
+                    code: 'missing-input',
+                    message: kind === 'keyword' ? 'keyword is required' : 'competitor is required',
+                  },
+                });
+                return;
+              }
+              const result = channel === 'user-chrome'
+                ? await pullUserChrome(pageUrl, { waitMs })
+                : await pullSemrush(pageUrl, { kind, waitMs });
+              sendJson(res, 200, { ...result, kind, own: body.own || '', competitor: body.competitor || '', keyword: body.keyword || '' });
+            })
+            .catch(() => sendJson(res, 400, { status: 'error', error: { code: 'bad-body', message: 'invalid body' } }));
+        },
+      }),
+    'seo-workbench: semrush-pull route',
+  );
+
+  // POST /api/semrush-parse { url, text, tables, model:{provider,model} } —
+  // turn the pulled Semrush page into strict JSON (overview / keywords /
+  // competitors / notes). No fabrication: the prompt forbids inventing numbers.
+  ctx.effect(
+    () =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path: `${API}semrush-parse`,
+        handler: (req, res) => {
+          if (req.method !== 'POST') {
+            sendJson(res, 405, { error: 'method-not-allowed' });
+            return;
+          }
+          readBody(req)
+            .then(async (raw) => {
+              let body;
+              try {
+                body = JSON.parse(raw || '{}');
+              } catch {
+                sendJson(res, 400, { status: 'error', error: { code: 'bad-json', message: 'invalid JSON' } });
+                return;
+              }
+              const url = body && typeof body.url === 'string' ? body.url.trim() : '';
+              const text = body && typeof body.text === 'string' ? body.text : '';
+              const tables = Array.isArray(body && body.tables) ? body.tables.slice(0, 4) : [];
+              const provider = body && body.model && typeof body.model.provider === 'string' ? body.model.provider : '';
+              const model = body && body.model && typeof body.model.model === 'string' ? body.model.model : '';
+              if (!url || !text) {
+                sendJson(res, 400, { status: 'error', error: { code: 'missing-input', message: 'url and text are required' } });
+                return;
+              }
+              if (!llm || !provider || !model) {
+                sendJson(res, 400, { status: 'error', error: { code: 'no-model', message: 'DHS 模型服务不可用，或未选择模型' } });
+                return;
+              }
+              const meta = {
+                kind: typeof body.kind === 'string' ? body.kind : '',
+                own: typeof body.own === 'string' ? body.own : '',
+                competitor: typeof body.competitor === 'string' ? body.competitor : '',
+                keyword: typeof body.keyword === 'string' ? body.keyword : '',
+              };
+              const prompt = buildSemrushParsePrompt(url, text, tables, meta);
+              const signal = AbortSignal.timeout(90000);
+              let out = '';
+              let fallback = '';
+              try {
+                for await (const chunk of llm.stream({
+                  provider,
+                  model,
+                  sessionId: 'seo-workbench-semrush-parse',
+                  messages: [{ role: 'user', content: [{ type: 'text', text: prompt }], source: { kind: 'user' } }],
+                  system: '你是资深 SEO 数据分析师，严格按指令输出 JSON。',
+                  temperature: 0.3,
+                  signal,
+                })) {
+                  out += chunkText(chunk);
+                  const full = messageText(chunk);
+                  if (full) fallback = full;
+                }
+              } catch (err) {
+                sendJson(res, 502, {
+                  status: 'error',
+                  error: { code: 'llm-failed', message: String((err && err.message) || err || 'llm call failed') },
+                });
+                return;
+              }
+              const output = (out || fallback || '').trim();
+              if (!output) {
+                sendJson(res, 502, { status: 'error', error: { code: 'empty-output', message: '模型没有返回内容，请换个模型再试' } });
+                return;
+              }
+              const parsed = extractJsonObject(output);
+              sendJson(res, 200, {
+                status: 'ok',
+                data: normalizeSemrushParse(parsed),
+                text: output,
+                model: { provider, model },
+                parseFailed: !parsed,
+              });
+            })
+            .catch(() => sendJson(res, 400, { status: 'error', error: { code: 'bad-body', message: 'invalid body' } }));
+        },
+      }),
+    'seo-workbench: semrush-parse route',
+  );
+
+  // GET /api/semrush-active-tab — read the user's current Chrome tab (URL and
+  // title) through the AppleScript helper, so the Semrush tab can be pointed at
+  // whatever tool link is open right now (that link keeps changing).
+  ctx.effect(
+    () =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path: `${API}semrush-active-tab`,
+        handler: (req, res) => {
+          if (req.method !== 'GET' && req.method !== 'POST') {
+            sendJson(res, 405, { error: 'method-not-allowed' });
+            return;
+          }
+          activeTabUrl({})
+            .then((data) => sendJson(res, 200, data))
+            .catch(() =>
+              sendJson(res, 200, { status: 'error', error: { code: 'tab-unavailable', message: '读取当前标签页失败' } }),
+            );
+        },
+      }),
+    'seo-workbench: semrush-active-tab route',
+  );
+
+  // POST /api/keywords-expand — ask the model to generate keyword candidates
+  // from the site's own keyword analysis (frequency, cannibalization, gaps)
+  // plus optional user seed words. No external volume data involved.
+  ctx.effect(
+    () =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path: `${API}keywords-expand`,
+        handler: (req, res) => {
+          if (req.method !== 'POST') {
+            sendJson(res, 405, { error: 'method-not-allowed' });
+            return;
+          }
+          readBody(req)
+            .then(async (raw) => {
+              let body;
+              try {
+                body = JSON.parse(raw || '{}');
+              } catch {
+                sendJson(res, 400, { status: 'error', error: { code: 'bad-json', message: 'invalid JSON' } });
+                return;
+              }
+              const url = body && typeof body.url === 'string' ? body.url.trim() : '';
+              const pick = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string').slice(0, 40) : []);
+              const seeds = pick(body && body.seeds).map((x) => x.trim()).filter(Boolean);
+              const topKeywords = Array.isArray(body && body.topKeywords) ? body.topKeywords.slice(0, 30) : [];
+              const clusters = Array.isArray(body && body.clusters) ? body.clusters.slice(0, 10) : [];
+              const gaps = Array.isArray(body && body.gaps) ? body.gaps.slice(0, 20) : [];
+              const provider = body && body.model && typeof body.model.provider === 'string' ? body.model.provider : '';
+              const model = body && body.model && typeof body.model.model === 'string' ? body.model.model : '';
+              if (!url) {
+                sendJson(res, 400, { status: 'error', error: { code: 'missing-input', message: 'url is required' } });
+                return;
+              }
+              if (!llm || !provider || !model) {
+                sendJson(res, 400, { status: 'error', error: { code: 'no-model', message: 'DHS 模型服务不可用，或未选择模型' } });
+                return;
+              }
+              const prompt = buildKeywordExpandPrompt(url, seeds, topKeywords, clusters, gaps);
+              const signal = AbortSignal.timeout(90000);
+              let text = '';
+              let fallback = '';
+              try {
+                for await (const chunk of llm.stream({
+                  provider,
+                  model,
+                  sessionId: 'seo-workbench-keywords-expand',
+                  messages: [{ role: 'user', content: [{ type: 'text', text: prompt }], source: { kind: 'user' } }],
+                  system: '你是资深 SEO 关键词研究员，严格按指令输出 JSON。',
+                  temperature: 0.5,
+                  signal,
+                })) {
+                  text += chunkText(chunk);
+                  const full = messageText(chunk);
+                  if (full) fallback = full;
+                }
+              } catch (err) {
+                sendJson(res, 502, {
+                  status: 'error',
+                  error: { code: 'llm-failed', message: String((err && err.message) || err || 'llm call failed') },
+                });
+                return;
+              }
+              const output = (text || fallback || '').trim();
+              if (!output) {
+                sendJson(res, 502, { status: 'error', error: { code: 'empty-output', message: '模型没有返回内容，请换个模型再试' } });
+                return;
+              }
+              const parsed = extractJsonArray(output);
+              const keywords = parsed ? parsed.map(normalizeKeywordItem).filter((k) => k.keyword) : [];
+              sendJson(res, 200, {
+                status: 'ok',
+                keywords,
+                text: output,
+                model: { provider, model },
+                parseFailed: !parsed || keywords.length === 0,
+              });
+            })
+            .catch(() => sendJson(res, 400, { status: 'error', error: { code: 'bad-body', message: 'invalid body' } }));
+        },
+      }),
+    'seo-workbench: keywords-expand route',
   );
 
   // POST /api/chat — embedded workbench conversation. Streams the model answer
